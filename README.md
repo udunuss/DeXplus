@@ -6,17 +6,8 @@ Developed against One UI 8.5 on a Galaxy Tab. Other One UI versions can differ.
 
 ![General](docs/screenshots/general.png)
 
-![Taskbar and panels](docs/screenshots/taskbar.png)
+https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
-![Home screen](docs/screenshots/home.png)
-
-![Dedicated workspace](docs/screenshots/workspace.png)
-
-![Window controls](docs/screenshots/windows.png)
-
-## Screen recording
-
-[Watch the screen recording](docs/screen-recording.mp4)
 
 ## Options
 
