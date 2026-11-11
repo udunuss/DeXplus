@@ -1,10 +1,12 @@
+
 # Dex+
 
 Dex+ brings classic DeX features to the newer One UI desktop mode. The desktop taskbar, notification and quick settings panels, home-screen layout, and window controls stay on the built-in display, so the new desktop still behaves like classic DeX.
 
 Developed against One UI 8.5 on a Galaxy Tab. Other One UI versions can differ.
 
-![General](docs/screenshots/general.png)
+<img width="1514" height="1119" alt="general" src="https://github.com/user-attachments/assets/30daf46a-2851-4a49-be9f-5df1cd3836aa" />
+
 
 https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
