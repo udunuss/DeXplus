@@ -14,6 +14,68 @@ Developed against One UI 8.5 on a Galaxy Tab. Other One UI versions can differ.
 
 ![Window controls](docs/screenshots/windows.png)
 
+## Screen recording
+
+[Watch the screen recording](docs/screen-recording.mp4)
+
+## Options
+
+### General
+
+- **Enable Dex+.** Master switch for the desktop taskbar, workspace, status bar, and window controls.
+- **Keep Desktop Mode Always Active.** Keeps the desktop taskbar and window features on the built-in display even when DeX mode is turned off.
+- **Hide Physical Keyboard Toolbar.** Hides the floating keyboard toolbar when a hardware keyboard is connected.
+- **Restart Home Screen.** Reloads One UI Home.
+- **Restart System UI.** Reloads System UI so title-bar changes start fresh.
+- **Restore Defaults.** Puts the settings back to their original values.
+
+### Taskbar & Panels
+
+- **Enable Desktop Taskbar.** Shows the desktop taskbar with running apps, a notification count, quick settings, calendar, and audio controls.
+- **Use Standard Notification & Quick Settings Shade.** Taskbar notification and quick settings buttons open the full system shade instead of the compact popups.
+- **Show Search Button on Taskbar.** Shows the Finder search button in the taskbar status area.
+- **Apply Scaling to External Displays.** Also applies the taskbar icon and density scale on connected monitors.
+- **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140%.
+- **Taskbar Height.** Height of the desktop taskbar. Default 100%. Range 75% to 135%.
+
+### Home Screen
+
+- **Hide Page Navigation Arrows.** Hides the left and right page arrows.
+- **Lock Home Screen Gestures.** Blocks the upward app-drawer swipe and the two-finger pinch edit gesture while desktop mode is on.
+- **Icon size.** Home screen icon size. The grid fits as many icons as it can at that size. Default 100%. Range 60% to 160%.
+- **Side Margins.** Space on the left and right of the home screen. Default 40%.
+- **Top Margin.** Space above the home screen grid. Default 0%.
+- **Bottom Margin.** Extra space between the icons and the taskbar. 0% sits the grid on the taskbar. Default 100%.
+
+### Dedicated Workspace
+
+- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a full-screen shortcut grid. Right-click or long-press to add or remove shortcuts.
+- **Open Shortcuts in Resizable Windows.** Opens workspace shortcuts in freeform desktop windows.
+- **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it.
+- **Workspace Columns.** Shortcut columns. Default 10. Range 6 to 16.
+- **Workspace Rows.** Shortcut rows. Default 5. Range 4 to 10.
+- **Shortcut Icon Size.** Size of workspace icons and labels. Default 100%. Range 70% to 140%.
+- **Reset Shortcuts.** Restores the default set of workspace shortcuts.
+
+### Window Controls
+
+- **Hide Top Status Bar.** Hides the top status bar in desktop mode so windows can use that space.
+- **Drag Window to Top Edge to Maximize.** Dragging a window to the top edge maximizes it instead of leaving DeX.
+- **Fullscreen inside the window.** A video fills the window it is already in. The window is not resized, and DeX stays open.
+- **Allow All Apps in Resizable Windows.** Lets every installed app run in a freeform window and be resized.
+- **Always-on-Top Pin Button.** Adds a pin button that keeps a window above the others.
+- **Hide Fullscreen Button on Windowed Apps.** Hides the extra fullscreen button on normal and maximized windows.
+- **Long-Press Maximize for Fullscreen.** Hold Maximize or Restore to enter or leave immersive fullscreen for that window.
+- **Hide App Icon Dropdown Arrow.** Hides the arrow next to the app icon. The icon still opens its menu.
+- **Window corner radius.** Rounds floating window corners, including the thin outline. 0 is square. Range 0 to 48 dp.
+- **Enable Enhanced Window Menu.** Adds extra tools to the menu opened from the app icon.
+- **Window Opacity Slider.** Adds a transparency slider from 20% to 100% in that menu.
+- **Center & Keep Awake Buttons.** Adds buttons to center the window and keep the screen awake while it is visible.
+- **Show App Info Shortcut.** Replaces Remove from workspace with a button that opens the app's system info page.
+- **Default Window Opacity.** Starting opacity for windows you have not adjusted from the menu. Default 100%. Range 30% to 100%.
+
+Changes apply as soon as you toggle them.
+
 ## AI disclaimer
 
 Most of this project was written with help from AI coding tools, then tried on a Samsung tablet running One UI desktop mode.
