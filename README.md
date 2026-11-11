@@ -144,4 +144,4 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an R8 jar. If `/system/fram
 
 ## License
 
-No license is set. Ask before you reuse the code.
+Dex+ is released under the [MIT License](LICENSE).
