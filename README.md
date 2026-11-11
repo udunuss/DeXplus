@@ -1,10 +1,8 @@
 # Dex+
 
-Dex+ is an LSPosed module for Samsung One UI desktop mode on the built-in display. It keeps the desktop taskbar, status panels, home-screen layout, and window controls available without leaving DeX for a normal tablet shell.
+Dex+ brings classic DeX features to the newer One UI desktop mode. The desktop taskbar, notification and quick settings panels, home-screen layout, and window controls stay on the built-in display, so the new desktop still behaves like classic DeX.
 
 Developed against One UI 8.5 on a Galaxy Tab. Other One UI versions can differ.
-
-Package name: `com.udunus.dexplus`.
 
 ## AI disclaimer
 
@@ -42,7 +40,7 @@ The clock and date popup on the taskbar is not given the same density treatment 
    - Samsung Keyboard (`com.samsung.android.honeyboard`), if you use it
 4. Reboot.
 
-Do not enable this module in the same process as `com.minsos.externaldex`. If that module is loaded, Dex+ skips its hooks.
+Do not enable this module together with the external DeX module. If that module is already loaded, Dex+ skips its hooks.
 
 After the first reboot, the in-app restart buttons reload One UI Home and System UI when you change settings. They do not need root.
 
