@@ -4,6 +4,14 @@ Dex+ brings classic DeX features to the newer One UI desktop mode. The desktop t
 
 Developed against One UI 8.5 on a Galaxy Tab. Other One UI versions can differ.
 
+The pictures below are illustrations. They use only Continuum, Dex+, and Settings, with no personal files or accounts.
+
+![Desktop windows and taskbar](docs/screenshots/desktop.png)
+
+![Dex+ window controls](docs/screenshots/settings.png)
+
+![Home screen icons above the taskbar](docs/screenshots/home.png)
+
 ## AI disclaimer
 
 Most of this project was written with help from AI coding tools, then tried on a Samsung tablet running One UI desktop mode.
