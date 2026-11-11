@@ -1,7 +1,7 @@
 
 # Dex+
 
-Dex+ brings classic DeX features to the newer One UI desktop mode. The desktop taskbar, notification and quick settings panels, home-screen layout, and window controls stay on the built-in display, so the new desktop still behaves like classic DeX.
+Dex+ is an LSPosed module for improving DeX. It brings classic DeX features to the newer One UI desktop mode, including the desktop taskbar, notification and quick settings panels, home-screen layout, and window controls on the built-in display.
 
 Developed against MinsOS 1.2.3 - One UI 8.5 on a Galaxy Tab S7+. Other One UI versions can differ.
 

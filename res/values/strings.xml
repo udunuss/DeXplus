@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Dex+</string>
-    <string name="module_description">Dex+ keeps One UI 8.5 desktop mode open, with a desktop taskbar, status panels, home screen layout, workspace, and window controls.</string>
+    <string name="module_description">An LSPosed module for improving DeX. Brings classic DeX features to the newer One UI desktop mode.</string>
 </resources>
