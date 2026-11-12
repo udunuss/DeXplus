@@ -1,7 +1,10 @@
 
 # Dex+
 
-Dex+ is an LSPosed module for improving DeX. It brings classic DeX features to the newer One UI desktop mode, including the desktop taskbar, notification and quick settings panels, home-screen layout, and window controls on the built-in display.
+> [!CAUTION]
+> Untested with Samsung DeX on external monitors. Using this module may break external DeX functionality.
+
+**Dex+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, improving the home-screen layout for desktop use, and adding extra window controls.
 
 Developed against MinsOS 1.2.3 - One UI 8.5 on a Galaxy Tab S7+. Other One UI versions can differ.
 
