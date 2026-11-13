@@ -117,15 +117,6 @@ Do not enable this module together with the external DeX module. If that module 
 
 After the first reboot, the in-app restart buttons reload One UI Home and System UI when you change settings. They do not need root.
 
-## Releases
-
-Pushing a tag named `v*` (for example `v1.2.35`) runs GitHub Actions. The workflow builds a signed APK and attaches it to a GitHub Release. The signing keystore is not in this repository. Actions reads it from repository secrets:
-
-- `KEYSTORE_BASE64` is the keystore file, base64-encoded
-- `KEYSTORE_PASSWORD` is the keystore password
-- `KEY_ALIAS` is the key alias inside the keystore
-- `KEY_PASSWORD` is that key's password
-
 ## Build on your own machine
 
 You need Java 17, Android SDK platform 34, build-tools that provide `aapt2`, `d8`, `zipalign`, and `apksigner`, and your own keystore.
