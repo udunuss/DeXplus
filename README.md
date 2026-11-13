@@ -49,8 +49,9 @@ https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
 ### Dedicated Workspace
 
-- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a scrollable, full-screen shortcut grid that adapts on rotation and window resize. Supports mouse/stylus right-click context menus, searchable app picker, drag-and-drop / arrange-mode reordering, keyboard navigation (`Enter`, `Delete`, `Menu`), and automatic redirection of "Add to Home" and browser/app pinned shortcuts.
+- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a scrollable, full-screen shortcut grid that adapts on rotation and window resize. Supports general right-click menus anywhere on empty space or icons, searchable app picker, direct mouse/touch drag-and-drop reordering, dragging apps directly from the App Drawer onto the desktop, keyboard navigation (`Enter`, `Delete`, `Menu`), Wallpaper & style shortcut, and automatic redirection of "Add to Home" and browser/app pinned shortcuts.
 - **Open Shortcuts in Resizable Windows.** Opens workspace shortcuts in freeform desktop windows.
+- **Free Grid Placement.** Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left.
 - **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it.
 - **Workspace Columns.** Shortcut columns. Default 10. Range 6 to 16.
 - **Workspace Rows.** Shortcut rows. Default 5. Range 4 to 10.
@@ -93,7 +94,7 @@ Read the code before you install it. It runs inside One UI Home, System UI, the 
 
 **Home screen.** Icon size picks the grid. Side, top, and bottom margins are adjustable. Bottom margin at 0% sits the icon grid on the taskbar. Page arrows and home-screen gestures can be locked while desktop mode is on.
 
-**Workspace.** Optional full-screen shortcut grid instead of the normal home pages. Supports drag-and-drop icon arranging, right-click context menus, searchable app picker, automatic "Add to Home" shortcut redirection, custom column/row counts and icon scaling, single or double click to open, and opening shortcuts in resizable windows.
+**Workspace.** Optional full-screen shortcut grid instead of the normal home pages. Supports drag-and-drop from the App Drawer or across grid slots, optional free grid placement anywhere on the grid, general empty-space and icon right-click menus, searchable app picker, automatic "Add to Home" shortcut redirection, Chrome/deep shortcut launching, custom column/row counts and icon scaling, single or double click to open, and opening shortcuts in resizable windows.
 
 **Windows.** Title-bar back button for that window only. Pin to keep a window above others. Drag a maximized window by its title bar to restore it and keep moving it. Drag to the top edge can maximize instead of leaving DeX. Long-press maximize for immersive fullscreen. Fullscreen requests from an app can stay inside the current window. App-icon menu can include opacity, center, keep-awake, and app info. Window corner radius applies to floating windows and the thin outline. Default opacity applies to windows you have not adjusted individually.
 
@@ -147,15 +148,11 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## Version
 
-`1.2.36-dex` (`versionCode` 10236)
+`1.2.38-dex` (`versionCode` 10238)
 
-### Highlights in `1.2.36-dex`
+### Highlights in `1.2.38-dex`
 
-- **Build & Termux verification:** Automatic Termux `$PREFIX/share/java/r8.jar` and `$PREFIX/tmp` fallback in `build.sh`.
-- **Launcher & Taskbar:** Independent **Enable Desktop Taskbar** gating, `task_bar_height_dex` height scaling, external display DPI toggle (`KEY_FIX_EXTERNAL_DEX_DPI`), live Finder button and non-restarting status/arrow toggles, and `WeakReference` notification badges.
-- **SystemUI Window Controls:** Dynamic resource-name lookup (with fallback IDs), live **Drag Window to Top Edge to Maximize** and **Long-Press Maximize** gating, clean restoration of default corner radius & window opacity on reset/disable, and `PIN_TAG`/`BACK_TAG` touch-pass handling.
-- **Framework & Honeyboard:** Live config staleness reload in `system_server` for **Allow All Apps in Resizable Windows**, and `ContentObserver`-cached effects state + module toggle check in Honeyboard.
-- **Dedicated Workspace & Settings UI:** Scrollable shortcut grid sized to view bounds, orientation rebuilds, compact top-tab layout in narrow (`< 600dp`) windows, confirmation prompts on destructive resets, and UID-restricted `PrefsProvider` writes.
+- **Dedicated Workspace:** Fixed empty-space right-click anywhere on the desktop, added **Free Grid Placement** to position icons freely on any grid cell, added direct drag-and-drop from the One UI App Drawer, removed redundant move/arrange-mode UI in favor of direct drag-and-drop, fixed Chrome/Edge pinned website shortcuts (`DEEP_SHORTCUT`) via `LauncherApps.startShortcut`, and updated **Wallpaper & style** to open Samsung's general Wallpaper & style settings (`com.samsung.intent.action.WALLPAPER_SETTING`).
 
 ## License
 

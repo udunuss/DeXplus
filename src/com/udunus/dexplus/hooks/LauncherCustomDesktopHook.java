@@ -3,6 +3,7 @@ package com.udunus.dexplus.hooks;
 import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.app.AndroidAppHelper;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ComponentName;
@@ -38,6 +39,7 @@ import android.util.TypedValue;
 import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -69,9 +71,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -83,6 +88,7 @@ public final class LauncherCustomDesktopHook {
     private static final String TAG_DEX_DESKTOP_VIEW = "minsos_custom_dex_desktop";
     private static final String DESKTOP_PREFS = "minsos_dex_desktop_shortcuts";
     private static final String KEY_SHORTCUT_LIST = "shortcut_components_v1";
+    private static final String KEY_SHORTCUT_POSITIONS = "shortcut_positions_v1";
     private static final String CUSTOM_SHORTCUT_PREFIX = "sc:";
     private static final String CUSTOM_SHORTCUT_DIR = "dexplus_shortcuts";
 
@@ -90,6 +96,8 @@ public final class LauncherCustomDesktopHook {
     private static volatile ViewGroup sActiveWorkspaceContainer;
     private static volatile String sLastRedirectedKey;
     private static volatile long sLastRedirectedTime;
+    private static volatile Object sLastHoneyDragInfo;
+    private static volatile long sLastHoneyDragTime;
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
@@ -97,6 +105,7 @@ public final class LauncherCustomDesktopHook {
         hookWorkspaceContainer(cl);
         hookInternalDexTransition(cl);
         hookAddToHomeRedirection(cl);
+        hookHomeAndDragSupport(cl);
 
         ModConfig.addChangeListener(new Runnable() {
             @Override
@@ -166,9 +175,125 @@ public final class LauncherCustomDesktopHook {
                     } catch (Throwable ignored) {}
                 }
             });
+
+            // Intercept stock WorkspaceContainer.onDrag so drops from App Drawer route to Dedicated Workspace
+            // instead of the hidden stock WorkspaceFastRecyclerView behind it.
+            XposedBridge.hookAllMethods(wsContainerClass, "onDrag", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        if (param.args == null || param.args.length < 2 || !(param.args[1] instanceof DragEvent)) return;
+                        ViewGroup wsContainer = (ViewGroup) param.thisObject;
+                        Context ctx = wsContainer.getContext();
+                        if (!isDedicatedWorkspaceActive(ctx)) return;
+                        if (sActiveDesktopContainer instanceof ClassicDexDesktopView && sActiveDesktopContainer.isShown()) {
+                            DragEvent ev = (DragEvent) param.args[1];
+                            boolean handled = ((ClassicDexDesktopView) sActiveDesktopContainer).handleHostDragEvent(wsContainer, ev);
+                            param.setResult(handled);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
         } catch (Throwable t) {
             XposedBridge.log(ModConfig.TAG + ": hookWorkspaceContainer error: " + t);
         }
+    }
+
+    /**
+     * Captures HoneySpace DragInfo payloads (App Drawer / OverlayApps drags) and routes HomeView
+     * secondary/right-clicks onto Dedicated Workspace when it is active and visible.
+     */
+    private static void hookHomeAndDragSupport(final ClassLoader cl) {
+        try {
+            Class<?> dragInfoClass = XposedHelpers.findClassIfExists("com.honeyspace.sdk.DragInfo", cl);
+            if (dragInfoClass != null) {
+                XposedBridge.hookAllConstructors(dragInfoClass, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        sLastHoneyDragInfo = param.thisObject;
+                        sLastHoneyDragTime = SystemClock.uptimeMillis();
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": hook DragInfo error: " + t);
+        }
+
+        try {
+            Class<?> homeViewClass = XposedHelpers.findClassIfExists(
+                    "com.honeyspace.ui.honeypots.homescreen.presentation.HomeView", cl);
+            if (homeViewClass != null) {
+                XposedBridge.hookAllMethods(homeViewClass, "dispatchTouchEvent", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args == null || param.args.length == 0 || !(param.args[0] instanceof MotionEvent)) return;
+                            View homeView = (View) param.thisObject;
+                            Context ctx = homeView.getContext();
+                            if (!isDedicatedWorkspaceActive(ctx)) return;
+                            if (!(sActiveDesktopContainer instanceof ClassicDexDesktopView) || !sActiveDesktopContainer.isShown()) {
+                                return;
+                            }
+
+                            MotionEvent ev = (MotionEvent) param.args[0];
+                            ClassicDexDesktopView desktop = (ClassicDexDesktopView) sActiveDesktopContainer;
+                            float[] local = mapViewCoordinates(homeView, desktop, ev.getX(), ev.getY());
+                            if (local != null) {
+                                desktop.recordPointerLocation(local[0], local[1]);
+                            }
+                            if (ClassicDexDesktopView.isSecondaryButtonEvent(ev)
+                                    || (desktop.isConsumingSecondaryClick() && (ev.getButtonState() & MotionEvent.BUTTON_SECONDARY) == 0
+                                    && (ev.getActionMasked() == MotionEvent.ACTION_UP || ev.getActionMasked() == MotionEvent.ACTION_CANCEL))) {
+                                if (ClassicDexDesktopView.isSecondaryButtonEvent(ev) && local != null) {
+                                    desktop.markConsumingSecondaryClick(ev.getActionMasked() == MotionEvent.ACTION_DOWN);
+                                    desktop.handleSecondaryMenuAt(local[0], local[1]);
+                                } else {
+                                    desktop.markConsumingSecondaryClick(false);
+                                }
+                                param.setResult(Boolean.TRUE);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": hook HomeView secondary click error: " + t);
+        }
+
+        // Prevent One UI Home's HomeView context-click listener (LE5/e -> Customize/Widgets popup)
+        // from firing over Dedicated Workspace, and show our empty desktop menu instead.
+        try {
+            Class<?> homeContextClickClass = XposedHelpers.findClassIfExists("E5.e", cl);
+            if (homeContextClickClass != null) {
+                XposedBridge.hookAllMethods(homeContextClickClass, "onContextClick", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Context ctx = resolveWorkspaceContext(null);
+                            if (!isDedicatedWorkspaceActive(ctx)) return;
+                            if (sActiveDesktopContainer instanceof ClassicDexDesktopView && sActiveDesktopContainer.isShown()) {
+                                ((ClassicDexDesktopView) sActiveDesktopContainer).handleSecondaryMenuAtLastTouch();
+                                param.setResult(Boolean.TRUE);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static float[] mapViewCoordinates(View from, View to, float x, float y) {
+        if (from == null || to == null) return null;
+        int[] fromLoc = new int[2];
+        int[] toLoc = new int[2];
+        from.getLocationInWindow(fromLoc);
+        to.getLocationInWindow(toLoc);
+        float lx = fromLoc[0] + x - toLoc[0];
+        float ly = fromLoc[1] + y - toLoc[1];
+        if (lx < 0f || ly < 0f || (to.getWidth() > 0 && lx > to.getWidth()) || (to.getHeight() > 0 && ly > to.getHeight())) {
+            return null;
+        }
+        return new float[]{lx, ly};
     }
 
     private static void hookInternalDexTransition(final ClassLoader cl) {
@@ -336,7 +461,23 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static boolean redirectBaseItemToWorkspace(Context ctx, Object baseItem, boolean showToast) {
-        if (ctx == null || baseItem == null) return false;
+        return addOrUpdateBaseItem(ctx, baseItem, null, null, showToast, true) != null;
+    }
+
+    /**
+     * Converts a HoneySpace BaseItem (AppItem or ShortcutItem) into a Dedicated Workspace entry,
+     * optionally placing it at a specific free-grid slot or compact position.
+     *
+     * @return the desktop storageKey if handled, or {@code null} if unsupported.
+     */
+    private static String addOrUpdateBaseItem(
+            Context ctx,
+            Object baseItem,
+            Integer targetCol,
+            Integer targetRow,
+            boolean showToast,
+            boolean dedupeRecent) {
+        if (ctx == null || baseItem == null) return null;
         String clsName = baseItem.getClass().getName();
 
         // AppItem -> launchable ComponentName
@@ -347,7 +488,7 @@ public final class LauncherCustomDesktopHook {
                         ? (ComponentName) XposedHelpers.callMethod(compKey, "getComponentName") : null;
                 if (cn != null) {
                     String flat = cn.flattenToString();
-                    if (isRecentlyRedirected(flat)) return true;
+                    if (dedupeRecent && isRecentlyRedirected(flat)) return flat;
                     String label = resolveLiveDataText(baseItem, "getLabel");
                     if (TextUtils.isEmpty(label)) {
                         try {
@@ -358,18 +499,21 @@ public final class LauncherCustomDesktopHook {
                         }
                     }
                     boolean added = addShortcutToDesktop(ctx, flat);
+                    if (targetCol != null && targetRow != null) {
+                        assignOrSwapSlot(ctx, flat, targetCol, targetRow);
+                    }
                     syncDesktopVisibilityOnMainThread();
                     if (showToast) {
                         showToastOnMain(ctx, added
                                 ? "Added \"" + label + "\" to workspace"
-                                : "\"" + label + "\" is already on workspace");
+                                : (targetCol != null ? "Moved \"" + label + "\"" : "\"" + label + "\" is already on workspace"));
                     }
-                    return true;
+                    return flat;
                 }
             } catch (Throwable t) {
-                XposedBridge.log(ModConfig.TAG + ": redirect AppItem error: " + t);
+                XposedBridge.log(ModConfig.TAG + ": addOrUpdate AppItem error: " + t);
             }
-            return false;
+            return null;
         }
 
         // ShortcutItem -> custom pinned shortcut / web bookmark / deep shortcut
@@ -388,7 +532,7 @@ public final class LauncherCustomDesktopHook {
                         }
                     } catch (Throwable ignored) {}
                 }
-                if (intent == null) return false;
+                if (intent == null) return null;
 
                 String label = resolveLiveDataText(baseItem, "getLabel");
                 if (TextUtils.isEmpty(label)) {
@@ -418,21 +562,24 @@ public final class LauncherCustomDesktopHook {
                 }
 
                 String key = buildCustomShortcutStorageKey(label, intent);
-                if (isRecentlyRedirected(key)) return true;
+                if (dedupeRecent && isRecentlyRedirected(key)) return key;
 
                 boolean added = saveAndAddCustomShortcut(ctx, key, label, intent, icon, pkg);
+                if (targetCol != null && targetRow != null) {
+                    assignOrSwapSlot(ctx, key, targetCol, targetRow);
+                }
                 syncDesktopVisibilityOnMainThread();
                 if (showToast) {
                     showToastOnMain(ctx, added
                             ? "Added \"" + label + "\" to workspace"
                             : "Updated \"" + label + "\" on workspace");
                 }
-                return true;
+                return key;
             } catch (Throwable t) {
-                XposedBridge.log(ModConfig.TAG + ": redirect ShortcutItem error: " + t);
+                XposedBridge.log(ModConfig.TAG + ": addOrUpdate ShortcutItem error: " + t);
             }
         }
-        return false;
+        return null;
     }
 
     private static boolean hasMethod(Object obj, String name) {
@@ -541,25 +688,61 @@ public final class LauncherCustomDesktopHook {
 
     /**
      * Dedicated Workspace Grid View that replaces One UI Home's normal workspace shortcuts
-     * when enabled. Supports reliable secondary/right-click, drag-and-drop icon arranging,
-     * keyboard navigation, and hover states.
+     * when enabled. Supports reliable right-click anywhere, direct mouse/touch drag-and-drop,
+     * optional free grid placement, App Drawer drop targets, keyboard navigation, and hover states.
      */
     private static final class ClassicDexDesktopView extends FrameLayout {
         private final ScrollView mScrollView;
         private final GridLayout mGridLayout;
         private final View mPopupAnchor;
-        private final LinearLayout mArrangeBar;
         private final List<View> mCellViews = new ArrayList<>();
+        private final Map<View, int[]> mSlotMap = new HashMap<>();
         private View mSelectedCell;
         private DesktopShortcutItem mSelectedItem;
+        private View mHighlightedDropCell;
         private BroadcastReceiver mCommandReceiver;
         private long mLastClickTime = 0L;
         private String mLastClickedKey = null;
         private float mLastTouchX = 200f;
         private float mLastTouchY = 200f;
-        private boolean mArrangeMode = false;
         private boolean mConsumingSecondaryClick = false;
         private long mLastSecondaryMenuTime = 0L;
+        private int mCurrentCols = 10;
+        private int mCurrentRows = 5;
+        private int mPendingAddCol = -1;
+        private int mPendingAddRow = -1;
+
+        private static final class DragSession {
+            final DesktopShortcutItem item;
+            final View sourceCell;
+            final float startGridX;
+            final float startGridY;
+            final boolean openMenuIfStationary;
+            float maxDistSq = 0f;
+            boolean handledDrop = false;
+
+            DragSession(
+                    DesktopShortcutItem item,
+                    View sourceCell,
+                    float startGridX,
+                    float startGridY,
+                    boolean openMenuIfStationary) {
+                this.item = item;
+                this.sourceCell = sourceCell;
+                this.startGridX = startGridX;
+                this.startGridY = startGridY;
+                this.openMenuIfStationary = openMenuIfStationary;
+            }
+
+            void recordGridPoint(float gx, float gy) {
+                float dx = gx - startGridX;
+                float dy = gy - startGridY;
+                float d2 = dx * dx + dy * dy;
+                if (d2 > maxDistSq) {
+                    maxDistSq = d2;
+                }
+            }
+        }
 
         ClassicDexDesktopView(final Context context) {
             super(context);
@@ -572,18 +755,17 @@ public final class LauncherCustomDesktopHook {
                 setContextClickable(true);
             }
 
-            // 1x1 invisible anchor view positioned at the exact mouse/touch coordinates for context menus
-            mPopupAnchor = new View(context);
-            FrameLayout.LayoutParams anchorLp = new FrameLayout.LayoutParams(1, 1);
-            mPopupAnchor.setVisibility(View.INVISIBLE);
-            addView(mPopupAnchor, anchorLp);
-
             mScrollView = new ScrollView(context);
             mScrollView.setFillViewport(true);
             mScrollView.setVerticalScrollBarEnabled(false);
+            mScrollView.setClickable(true);
+            mScrollView.setLongClickable(true);
+            if (Build.VERSION.SDK_INT >= 23) {
+                mScrollView.setContextClickable(true);
+            }
 
             mGridLayout = new GridLayout(context);
-            mGridLayout.setOrientation(GridLayout.VERTICAL); // Top-to-bottom, then left-to-right
+            mGridLayout.setOrientation(GridLayout.VERTICAL);
             mGridLayout.setClickable(true);
             mGridLayout.setLongClickable(true);
             if (Build.VERSION.SDK_INT >= 23) {
@@ -598,16 +780,16 @@ public final class LauncherCustomDesktopHook {
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
 
-            // Floating bar shown only while "Arrange icons" mode is active
-            mArrangeBar = buildArrangeModeBar(context);
-            mArrangeBar.setVisibility(View.GONE);
-            FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-            );
-            barLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            barLp.topMargin = dpToPx(context, 14);
-            addView(mArrangeBar, barLp);
+            // Invisible (alpha=0) yet View.VISIBLE anchor on top so PopupMenu always has valid layout bounds
+            mPopupAnchor = new View(context);
+            mPopupAnchor.setAlpha(0f);
+            mPopupAnchor.setClickable(false);
+            mPopupAnchor.setFocusable(false);
+            int anchorPx = Math.max(2, dpToPx(context, 2));
+            FrameLayout.LayoutParams anchorLp = new FrameLayout.LayoutParams(anchorPx, anchorPx);
+            anchorLp.gravity = Gravity.TOP | Gravity.START;
+            mPopupAnchor.setVisibility(View.VISIBLE);
+            addView(mPopupAnchor, anchorLp);
 
             OnClickListener clearClick = new OnClickListener() {
                 @Override
@@ -627,6 +809,8 @@ public final class LauncherCustomDesktopHook {
 
             setOnClickListener(clearClick);
             setOnLongClickListener(emptyLongClick);
+            mScrollView.setOnClickListener(clearClick);
+            mScrollView.setOnLongClickListener(emptyLongClick);
             mGridLayout.setOnClickListener(clearClick);
             mGridLayout.setOnLongClickListener(emptyLongClick);
 
@@ -639,21 +823,65 @@ public final class LauncherCustomDesktopHook {
                     }
                 };
                 setOnContextClickListener(emptyContextClick);
+                mScrollView.setOnContextClickListener(emptyContextClick);
                 mGridLayout.setOnContextClickListener(emptyContextClick);
             }
 
-            // Dropping onto empty grid space moves the dragged icon to the end
+            OnGenericMotionListener secondaryGenericListener = new OnGenericMotionListener() {
+                @Override
+                public boolean onGenericMotion(View v, MotionEvent event) {
+                    if (event == null) return false;
+                    float[] desk = mapViewCoordinates(v, ClassicDexDesktopView.this, event.getX(), event.getY());
+                    if (desk != null) {
+                        mLastTouchX = desk[0];
+                        mLastTouchY = desk[1];
+                    }
+                    int action = event.getActionMasked();
+                    if ((action == MotionEvent.ACTION_BUTTON_PRESS || action == MotionEvent.ACTION_DOWN)
+                            && isSecondaryButtonEvent(event)) {
+                        handleSecondaryMenuAt(mLastTouchX, mLastTouchY);
+                        return true;
+                    }
+                    if (action == MotionEvent.ACTION_BUTTON_RELEASE
+                            && Build.VERSION.SDK_INT >= 23
+                            && event.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
+                        return true;
+                    }
+                    return false;
+                }
+            };
+            mScrollView.setOnGenericMotionListener(secondaryGenericListener);
+            mGridLayout.setOnGenericMotionListener(secondaryGenericListener);
+
+            // Accept both internal drags and App Drawer / OverlayApps drags on empty grid areas
             mGridLayout.setOnDragListener(new OnDragListener() {
                 @Override
                 public boolean onDrag(View v, DragEvent event) {
-                    if (!(event.getLocalState() instanceof DesktopShortcutItem)) return false;
+                    if (!isSupportedDragEvent(event)) return false;
                     int action = event.getAction();
                     if (action == DragEvent.ACTION_DRAG_STARTED) {
                         return true;
+                    } else if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                        updateDragSessionLocation(event.getLocalState(), event.getX(), event.getY());
+                        if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false)) {
+                            int[] slot = gridCoordsToSlot(event.getX(), event.getY());
+                            View slotView = findViewAtSlot(slot[0], slot[1]);
+                            if (slotView != null && slotView.getTag() == null) {
+                                setDropHighlight(slotView);
+                            } else {
+                                clearDropHighlight();
+                            }
+                        }
+                        return true;
+                    } else if (action == DragEvent.ACTION_DRAG_EXITED) {
+                        clearDropHighlight();
+                        return true;
                     } else if (action == DragEvent.ACTION_DROP) {
-                        DesktopShortcutItem dragged = (DesktopShortcutItem) event.getLocalState();
-                        moveShortcut(context, dragged.storageKey, null);
-                        rebuildGrid();
+                        clearDropHighlight();
+                        return handleDropOnGrid(event.getX(), event.getY(), null, event);
+                    } else if (action == DragEvent.ACTION_DRAG_ENDED) {
+                        clearDropHighlight();
+                        finishDragSession(event);
                         return true;
                     }
                     return true;
@@ -663,73 +891,53 @@ public final class LauncherCustomDesktopHook {
             rebuildGrid();
         }
 
-        private LinearLayout buildArrangeModeBar(final Context context) {
-            LinearLayout bar = new LinearLayout(context);
-            bar.setOrientation(LinearLayout.HORIZONTAL);
-            bar.setGravity(Gravity.CENTER_VERTICAL);
-            int padH = dpToPx(context, 14);
-            int padV = dpToPx(context, 8);
-            bar.setPadding(padH, padV, padH, padV);
-
-            GradientDrawable bg = new GradientDrawable();
-            bg.setColor(Color.argb(232, 24, 28, 38));
-            bg.setCornerRadius(dpToPx(context, 22));
-            bg.setStroke(dpToPx(context, 1), Color.argb(140, 96, 165, 250));
-            bar.setBackground(bg);
-            bar.setElevation(dpToPx(context, 8));
-
-            TextView hint = new TextView(context);
-            hint.setText("Drag icons to rearrange");
-            hint.setTextColor(Color.rgb(241, 245, 249));
-            hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-            LinearLayout.LayoutParams hintLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            hintLp.rightMargin = dpToPx(context, 12);
-            bar.addView(hint, hintLp);
-
-            bar.addView(createPillAction(context, "Sort A–Z", false, new OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    sortShortcutsAlphabetically(context);
-                    rebuildGrid();
-                }
-            }));
-
-            LinearLayout.LayoutParams doneLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            doneLp.leftMargin = dpToPx(context, 8);
-            TextView doneBtn = createPillAction(context, "Done", true, new OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    setArrangeMode(false);
-                }
-            });
-            bar.addView(doneBtn, doneLp);
-
-            return bar;
+        void recordPointerLocation(float localX, float localY) {
+            mLastTouchX = localX;
+            mLastTouchY = localY;
         }
 
-        private TextView createPillAction(Context context, String label, boolean accent, OnClickListener listener) {
-            TextView btn = new TextView(context);
-            btn.setText(label);
-            btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-            btn.setTextColor(Color.WHITE);
-            btn.setPadding(dpToPx(context, 12), dpToPx(context, 5), dpToPx(context, 12), dpToPx(context, 5));
-            GradientDrawable pill = new GradientDrawable();
-            pill.setColor(accent ? Color.rgb(37, 99, 235) : Color.argb(60, 255, 255, 255));
-            pill.setCornerRadius(dpToPx(context, 14));
-            btn.setBackground(pill);
-            btn.setOnClickListener(listener);
-            return btn;
+        boolean isConsumingSecondaryClick() {
+            return mConsumingSecondaryClick;
         }
 
-        private void setArrangeMode(boolean enabled) {
-            mArrangeMode = enabled;
-            mArrangeBar.setVisibility(enabled ? View.VISIBLE : View.GONE);
-            if (enabled) {
-                mArrangeBar.bringToFront();
+        void markConsumingSecondaryClick(boolean consuming) {
+            mConsumingSecondaryClick = consuming;
+        }
+
+        void handleSecondaryMenuAtLastTouch() {
+            handleSecondaryMenuAt(mLastTouchX, mLastTouchY);
+        }
+
+        boolean handleHostDragEvent(View host, DragEvent event) {
+            if (event == null || !isSupportedDragEvent(event)) return false;
+            int action = event.getAction();
+            if (action == DragEvent.ACTION_DRAG_STARTED) {
+                return true;
             }
-            rebuildGrid();
+            if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                float[] gridPos = mapHostEventToGrid(host, event.getX(), event.getY());
+                updateDragSessionLocation(event.getLocalState(), gridPos[0], gridPos[1]);
+                return true;
+            }
+            if (action == DragEvent.ACTION_DROP) {
+                clearDropHighlight();
+                float[] gridPos = mapHostEventToGrid(host, event.getX(), event.getY());
+                return handleDropOnGrid(gridPos[0], gridPos[1], null, event);
+            }
+            if (action == DragEvent.ACTION_DRAG_ENDED) {
+                clearDropHighlight();
+                finishDragSession(event);
+                return true;
+            }
+            return true;
+        }
+
+        private float[] mapHostEventToGrid(View host, float hostX, float hostY) {
+            int[] hostLoc = new int[2];
+            int[] gridLoc = new int[2];
+            host.getLocationInWindow(hostLoc);
+            mGridLayout.getLocationInWindow(gridLoc);
+            return new float[]{hostLoc[0] + hostX - gridLoc[0], hostLoc[1] + hostY - gridLoc[1]};
         }
 
         @Override
@@ -836,10 +1044,6 @@ public final class LauncherCustomDesktopHook {
                 rebuildGrid();
                 return true;
             }
-            if (keyCode == KeyEvent.KEYCODE_ESCAPE && mArrangeMode) {
-                setArrangeMode(false);
-                return true;
-            }
             return super.onKeyDown(keyCode, event);
         }
 
@@ -847,6 +1051,8 @@ public final class LauncherCustomDesktopHook {
             long now = SystemClock.uptimeMillis();
             if (now - mLastSecondaryMenuTime < 180L) return;
             mLastSecondaryMenuTime = now;
+            mLastTouchX = viewX;
+            mLastTouchY = viewY;
 
             View hitCell = findCellAt(viewX, viewY);
             if (hitCell != null && hitCell.getTag() instanceof DesktopShortcutItem) {
@@ -865,6 +1071,7 @@ public final class LauncherCustomDesktopHook {
             for (int i = 0; i < mGridLayout.getChildCount(); i++) {
                 View child = mGridLayout.getChildAt(i);
                 if (child.getVisibility() != View.VISIBLE) continue;
+                if (!(child.getTag() instanceof DesktopShortcutItem)) continue;
                 if (gx >= child.getLeft() && gx < child.getRight()
                         && gy >= child.getTop() && gy < child.getBottom()) {
                     return child;
@@ -873,18 +1080,48 @@ public final class LauncherCustomDesktopHook {
             return null;
         }
 
-        private View prepareAnchorAt(float x, float y) {
-            int maxX = Math.max(1, getWidth() - dpToPx(getContext(), 8));
-            int maxY = Math.max(1, getHeight() - dpToPx(getContext(), 8));
-            int px = Math.max(0, Math.min((int) x, maxX));
-            int py = Math.max(0, Math.min((int) y, maxY));
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mPopupAnchor.getLayoutParams();
-            if (lp != null) {
-                lp.leftMargin = px;
-                lp.topMargin = py;
-                mPopupAnchor.setLayoutParams(lp);
+        private int[] viewCoordsToGridSlot(float viewX, float viewY) {
+            float gx = viewX - mScrollView.getLeft() + mScrollView.getScrollX() - mGridLayout.getLeft();
+            float gy = viewY - mScrollView.getTop() + mScrollView.getScrollY() - mGridLayout.getTop();
+            return gridCoordsToSlot(gx, gy);
+        }
+
+        private int[] gridCoordsToSlot(float gx, float gy) {
+            int cols = Math.max(1, mCurrentCols);
+            int padL = mGridLayout.getPaddingLeft();
+            int padT = mGridLayout.getPaddingTop();
+            int availW = Math.max(1, mGridLayout.getWidth() - padL - mGridLayout.getPaddingRight());
+            int availH = Math.max(1, getHeight() - padT - mGridLayout.getPaddingBottom());
+            float cellW = availW / (float) cols;
+            float cellH = availH / (float) Math.max(1, mCurrentRows);
+            int col = Math.max(0, Math.min(cols - 1, (int) ((gx - padL) / Math.max(1f, cellW))));
+            int row = Math.max(0, (int) ((gy - padT) / Math.max(1f, cellH)));
+            return new int[]{col, row};
+        }
+
+        private View findViewAtSlot(int col, int row) {
+            for (Map.Entry<View, int[]> entry : mSlotMap.entrySet()) {
+                int[] pos = entry.getValue();
+                if (pos != null && pos[0] == col && pos[1] == row) {
+                    return entry.getKey();
+                }
             }
-            mPopupAnchor.layout(px, py, px + 1, py + 1);
+            return null;
+        }
+
+        private View prepareAnchorAt(float x, float y) {
+            Context ctx = getContext();
+            DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            int w = getWidth() > 0 ? getWidth() : dm.widthPixels;
+            int h = getHeight() > 0 ? getHeight() : dm.heightPixels;
+            int anchorW = Math.max(2, mPopupAnchor.getWidth() > 0 ? mPopupAnchor.getWidth() : dpToPx(ctx, 2));
+            int anchorH = Math.max(2, mPopupAnchor.getHeight() > 0 ? mPopupAnchor.getHeight() : dpToPx(ctx, 2));
+            float px = Math.max(0f, Math.min(x, Math.max(0, w - anchorW - dpToPx(ctx, 4))));
+            float py = Math.max(0f, Math.min(y, Math.max(0, h - anchorH - dpToPx(ctx, 4))));
+            mPopupAnchor.setVisibility(View.VISIBLE);
+            mPopupAnchor.setTranslationX(px);
+            mPopupAnchor.setTranslationY(py);
+            mPopupAnchor.bringToFront();
             return mPopupAnchor;
         }
 
@@ -933,29 +1170,28 @@ public final class LauncherCustomDesktopHook {
             String previousSelectedKey = mSelectedItem != null ? mSelectedItem.storageKey : null;
             mSelectedCell = null;
             mSelectedItem = null;
+            mHighlightedDropCell = null;
             mCellViews.clear();
+            mSlotMap.clear();
 
             int cols = Math.max(6, Math.min(16, ModConfig.getInt(ctx, ModConfig.KEY_DESKTOP_GRID_COLS, 10)));
             int rows = Math.max(4, Math.min(10, ModConfig.getInt(ctx, ModConfig.KEY_DESKTOP_GRID_ROWS, 5)));
+            mCurrentCols = cols;
+            mCurrentRows = rows;
             int iconScale = Math.max(65, Math.min(150, ModConfig.getInt(ctx, ModConfig.KEY_DESKTOP_ICON_SCALE, 100)));
+            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false);
 
             DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
             int totalW = getWidth() > 0 ? getWidth() : dm.widthPixels;
             int totalH = getHeight() > 0 ? getHeight() : dm.heightPixels;
             int padLeft = dpToPx(ctx, 22);
-            int padTop = dpToPx(ctx, mArrangeMode ? 58 : 26);
+            int padTop = dpToPx(ctx, 26);
             int padRight = dpToPx(ctx, 22);
             int taskbarPx = LauncherDexTaskbarHook.getScaledTaskbarHeightPx(ctx);
             int padBottom = taskbarPx > 0 ? taskbarPx + dpToPx(ctx, 16) : dpToPx(ctx, 76);
             mGridLayout.setPadding(padLeft, padTop, padRight, padBottom);
 
             List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
-            int effectiveRows = Math.max(rows, (items.size() + cols - 1) / cols);
-
-            mGridLayout.removeAllViews();
-            mGridLayout.setColumnCount(cols);
-            mGridLayout.setRowCount(effectiveRows);
-
             int availW = Math.max(300, totalW - padLeft - padRight);
             int availH = Math.max(250, totalH - padTop - padBottom);
             int cellW = availW / cols;
@@ -964,22 +1200,146 @@ public final class LauncherCustomDesktopHook {
             iconSizePx = Math.max(dpToPx(ctx, 20),
                     Math.min(iconSizePx, Math.min(cellW - dpToPx(ctx, 16), cellH - dpToPx(ctx, 28))));
 
-            for (int i = 0; i < items.size(); i++) {
-                final DesktopShortcutItem item = items.get(i);
-                View cell = createDesktopShortcutCell(ctx, item, cellW, cellH, iconSizePx);
-                mGridLayout.addView(cell);
-                mCellViews.add(cell);
-                if (previousSelectedKey != null && previousSelectedKey.equals(item.storageKey)) {
-                    selectCell(cell, item);
+            mGridLayout.removeAllViews();
+
+            if (freePlacement) {
+                Map<String, int[]> placements = resolveGridPlacements(ctx, items, cols, rows);
+                int maxRow = rows - 1;
+                for (int[] pos : placements.values()) {
+                    if (pos[1] > maxRow) maxRow = pos[1];
+                }
+                int effectiveRows = maxRow + 1;
+                mGridLayout.setOrientation(GridLayout.HORIZONTAL);
+                mGridLayout.setColumnCount(cols);
+                mGridLayout.setRowCount(effectiveRows);
+
+                DesktopShortcutItem[][] matrix = new DesktopShortcutItem[cols][effectiveRows];
+                for (DesktopShortcutItem item : items) {
+                    int[] pos = placements.get(item.storageKey);
+                    if (pos != null && pos[0] >= 0 && pos[0] < cols && pos[1] >= 0 && pos[1] < effectiveRows) {
+                        matrix[pos[0]][pos[1]] = item;
+                    }
+                }
+
+                for (int r = 0; r < effectiveRows; r++) {
+                    for (int c = 0; c < cols; c++) {
+                        DesktopShortcutItem item = matrix[c][r];
+                        GridLayout.LayoutParams lp = new GridLayout.LayoutParams(
+                                GridLayout.spec(r), GridLayout.spec(c));
+                        lp.width = cellW;
+                        lp.height = cellH;
+                        if (item != null) {
+                            View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                            mGridLayout.addView(cell);
+                            mCellViews.add(cell);
+                            mSlotMap.put(cell, new int[]{c, r});
+                            if (previousSelectedKey != null && previousSelectedKey.equals(item.storageKey)) {
+                                selectCell(cell, item);
+                            }
+                        } else {
+                            View emptySlot = createEmptySlotCell(ctx, c, r, lp);
+                            mGridLayout.addView(emptySlot);
+                            mSlotMap.put(emptySlot, new int[]{c, r});
+                        }
+                    }
+                }
+            } else {
+                int effectiveRows = Math.max(rows, (items.size() + cols - 1) / cols);
+                mGridLayout.setOrientation(GridLayout.VERTICAL);
+                mGridLayout.setColumnCount(cols);
+                mGridLayout.setRowCount(effectiveRows);
+
+                for (int i = 0; i < items.size(); i++) {
+                    final DesktopShortcutItem item = items.get(i);
+                    int c = i / effectiveRows;
+                    int r = i % effectiveRows;
+                    GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+                    lp.width = cellW;
+                    lp.height = cellH;
+                    View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                    mGridLayout.addView(cell);
+                    mCellViews.add(cell);
+                    mSlotMap.put(cell, new int[]{c, r});
+                    if (previousSelectedKey != null && previousSelectedKey.equals(item.storageKey)) {
+                        selectCell(cell, item);
+                    }
                 }
             }
+        }
+
+        private View createEmptySlotCell(final Context context, final int col, final int row, GridLayout.LayoutParams lp) {
+            final FrameLayout slot = new FrameLayout(context);
+            slot.setLayoutParams(lp);
+            slot.setClickable(true);
+            slot.setLongClickable(true);
+            if (Build.VERSION.SDK_INT >= 23) {
+                slot.setContextClickable(true);
+            }
+
+            slot.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    clearSelection();
+                    ClassicDexDesktopView.this.requestFocus();
+                }
+            });
+            slot.setOnLongClickListener(new OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    showEmptyDesktopMenu(mLastTouchX, mLastTouchY);
+                    return true;
+                }
+            });
+            if (Build.VERSION.SDK_INT >= 23) {
+                slot.setOnContextClickListener(new OnContextClickListener() {
+                    @Override
+                    public boolean onContextClick(View v) {
+                        handleSecondaryMenuAt(mLastTouchX, mLastTouchY);
+                        return true;
+                    }
+                });
+            }
+            slot.setOnDragListener(new OnDragListener() {
+                @Override
+                public boolean onDrag(View v, DragEvent event) {
+                    if (!isSupportedDragEvent(event)) return false;
+                    switch (event.getAction()) {
+                        case DragEvent.ACTION_DRAG_STARTED:
+                            return true;
+                        case DragEvent.ACTION_DRAG_ENTERED:
+                            setDropHighlight(slot);
+                            return true;
+                        case DragEvent.ACTION_DRAG_LOCATION:
+                            updateDragSessionLocation(event.getLocalState(),
+                                    slot.getLeft() + event.getX(), slot.getTop() + event.getY());
+                            setDropHighlight(slot);
+                            return true;
+                        case DragEvent.ACTION_DRAG_EXITED:
+                            if (mHighlightedDropCell == slot) {
+                                clearDropHighlight();
+                            }
+                            return true;
+                        case DragEvent.ACTION_DROP:
+                            clearDropHighlight();
+                            return handleDropOnSlot(col, row, null,
+                                    slot.getLeft() + event.getX(), slot.getTop() + event.getY(), event);
+                        case DragEvent.ACTION_DRAG_ENDED:
+                            clearDropHighlight();
+                            return true;
+                    }
+                    return false;
+                }
+            });
+            return slot;
         }
 
         private View createDesktopShortcutCell(
                 final Context context,
                 final DesktopShortcutItem item,
-                int cellW,
-                int cellH,
+                final int slotCol,
+                final int slotRow,
+                GridLayout.LayoutParams lp,
                 int iconSizePx) {
             final LinearLayout cell = new LinearLayout(context);
             cell.setTag(item);
@@ -990,15 +1350,7 @@ public final class LauncherCustomDesktopHook {
             if (Build.VERSION.SDK_INT >= 23) {
                 cell.setContextClickable(true);
             }
-
-            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
-            lp.width = cellW;
-            lp.height = cellH;
             cell.setLayoutParams(lp);
-
-            if (mArrangeMode) {
-                applyArrangeIdleBackground(cell);
-            }
 
             ImageView iconView = new ImageView(context);
             iconView.setImageDrawable(item.icon);
@@ -1024,10 +1376,6 @@ public final class LauncherCustomDesktopHook {
             cell.setOnClickListener(new OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (mArrangeMode) {
-                        selectCell(cell, item);
-                        return;
-                    }
                     boolean requireDoubleClick = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_DOUBLE_CLICK, false);
                     long now = System.currentTimeMillis();
                     if (requireDoubleClick) {
@@ -1046,16 +1394,15 @@ public final class LauncherCustomDesktopHook {
                 }
             });
 
+            final float[] lastTouchLocal = new float[]{lp.width * 0.5f, lp.height * 0.5f};
+
             cell.setOnLongClickListener(new OnLongClickListener() {
                 @Override
                 public boolean onLongClick(View v) {
                     v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                     selectCell(cell, item);
-                    if (mArrangeMode) {
-                        startCellDrag(cell, item);
-                    } else {
-                        showShortcutContextMenu(context, cell, item);
-                    }
+                    // Start drag immediately so finger drag works seamlessly; stationary release opens menu
+                    startCellDrag(cell, item, cell.getLeft() + lastTouchLocal[0], cell.getTop() + lastTouchLocal[1], true);
                     return true;
                 }
             });
@@ -1077,7 +1424,7 @@ public final class LauncherCustomDesktopHook {
             cell.setOnHoverListener(new OnHoverListener() {
                 @Override
                 public boolean onHover(View v, MotionEvent event) {
-                    if (cell == mSelectedCell) return false;
+                    if (cell == mSelectedCell || cell == mHighlightedDropCell) return false;
                     int action = event.getActionMasked();
                     if (action == MotionEvent.ACTION_HOVER_ENTER) {
                         GradientDrawable hoverBg = new GradientDrawable();
@@ -1091,7 +1438,7 @@ public final class LauncherCustomDesktopHook {
                 }
             });
 
-            // Direct mouse/stylus drag or any-finger drag in Arrange Mode
+            // Immediate left-button drag for mouse and stylus
             final int dragSlop = Math.max(ViewConfiguration.get(context).getScaledTouchSlop(), dpToPx(context, 8));
             cell.setOnTouchListener(new OnTouchListener() {
                 private float downX, downY;
@@ -1104,18 +1451,23 @@ public final class LauncherCustomDesktopHook {
                     if (action == MotionEvent.ACTION_DOWN) {
                         downX = event.getRawX();
                         downY = event.getRawY();
+                        lastTouchLocal[0] = event.getX();
+                        lastTouchLocal[1] = event.getY();
                         dragStarted = false;
                         int tool = event.getToolType(0);
                         boolean primaryOnly = (event.getButtonState() & MotionEvent.BUTTON_SECONDARY) == 0;
-                        allowImmediateDrag = primaryOnly && (mArrangeMode
-                                || tool == MotionEvent.TOOL_TYPE_MOUSE
-                                || tool == MotionEvent.TOOL_TYPE_STYLUS);
-                    } else if (action == MotionEvent.ACTION_MOVE && allowImmediateDrag && !dragStarted) {
-                        float dx = event.getRawX() - downX;
-                        float dy = event.getRawY() - downY;
-                        if ((dx * dx + dy * dy) > (dragSlop * dragSlop)) {
-                            dragStarted = true;
-                            startCellDrag(cell, item);
+                        allowImmediateDrag = primaryOnly
+                                && (tool == MotionEvent.TOOL_TYPE_MOUSE || tool == MotionEvent.TOOL_TYPE_STYLUS);
+                    } else if (action == MotionEvent.ACTION_MOVE) {
+                        lastTouchLocal[0] = event.getX();
+                        lastTouchLocal[1] = event.getY();
+                        if (allowImmediateDrag && !dragStarted) {
+                            float dx = event.getRawX() - downX;
+                            float dy = event.getRawY() - downY;
+                            if ((dx * dx + dy * dy) > (dragSlop * dragSlop)) {
+                                dragStarted = true;
+                                startCellDrag(cell, item, cell.getLeft() + event.getX(), cell.getTop() + event.getY(), false);
+                            }
                         }
                     } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                         allowImmediateDrag = false;
@@ -1128,30 +1480,29 @@ public final class LauncherCustomDesktopHook {
             cell.setOnDragListener(new OnDragListener() {
                 @Override
                 public boolean onDrag(View v, DragEvent event) {
-                    if (!(event.getLocalState() instanceof DesktopShortcutItem)) return false;
-                    DesktopShortcutItem dragged = (DesktopShortcutItem) event.getLocalState();
+                    if (!isSupportedDragEvent(event)) return false;
+                    Object local = event.getLocalState();
+                    String draggedKey = (local instanceof DragSession) ? ((DragSession) local).item.storageKey : null;
                     switch (event.getAction()) {
                         case DragEvent.ACTION_DRAG_STARTED:
                             return true;
                         case DragEvent.ACTION_DRAG_ENTERED:
-                            if (!dragged.storageKey.equals(item.storageKey)) {
-                                GradientDrawable dropBg = new GradientDrawable();
-                                dropBg.setColor(Color.argb(75, 56, 189, 248));
-                                dropBg.setCornerRadius(dpToPx(context, 10));
-                                dropBg.setStroke(dpToPx(context, 2), Color.argb(220, 125, 211, 252));
-                                cell.setBackground(dropBg);
+                            if (!item.storageKey.equals(draggedKey)) {
+                                setDropHighlight(cell);
                             }
+                            return true;
+                        case DragEvent.ACTION_DRAG_LOCATION:
+                            updateDragSessionLocation(local, cell.getLeft() + event.getX(), cell.getTop() + event.getY());
                             return true;
                         case DragEvent.ACTION_DRAG_EXITED:
-                            restoreCellBackground(cell);
-                            return true;
-                        case DragEvent.ACTION_DROP:
-                            restoreCellBackground(cell);
-                            if (!dragged.storageKey.equals(item.storageKey)) {
-                                moveShortcut(context, dragged.storageKey, item.storageKey);
-                                rebuildGrid();
+                            if (mHighlightedDropCell == cell) {
+                                clearDropHighlight();
                             }
                             return true;
+                        case DragEvent.ACTION_DROP:
+                            clearDropHighlight();
+                            return handleDropOnSlot(slotCol, slotRow, item,
+                                    cell.getLeft() + event.getX(), cell.getTop() + event.getY(), event);
                         case DragEvent.ACTION_DRAG_ENDED:
                             cell.setAlpha(1.0f);
                             restoreCellBackground(cell);
@@ -1164,30 +1515,252 @@ public final class LauncherCustomDesktopHook {
             return cell;
         }
 
-        private static void startCellDrag(View cell, DesktopShortcutItem item) {
+        private void startCellDrag(
+                View cell,
+                DesktopShortcutItem item,
+                float startGridX,
+                float startGridY,
+                boolean openMenuIfStationary) {
             try {
                 ClipData clip = ClipData.newPlainText("dexplus_shortcut", item.storageKey);
                 View.DragShadowBuilder shadow = new View.DragShadowBuilder(cell);
-                cell.startDragAndDrop(clip, shadow, item, 0);
+                DragSession session = new DragSession(item, cell, startGridX, startGridY, openMenuIfStationary);
+                cell.startDragAndDrop(clip, shadow, session, 0);
                 cell.setAlpha(0.35f);
             } catch (Throwable t) {
                 XposedBridge.log(ModConfig.TAG + ": startCellDrag error: " + t);
             }
         }
 
-        private void applyArrangeIdleBackground(View cell) {
-            GradientDrawable bg = new GradientDrawable();
-            bg.setColor(Color.argb(24, 255, 255, 255));
-            bg.setCornerRadius(dpToPx(getContext(), 10));
-            bg.setStroke(dpToPx(getContext(), 1), Color.argb(65, 148, 163, 184));
-            cell.setBackground(bg);
+        private void updateDragSessionLocation(Object localState, float gx, float gy) {
+            if (localState instanceof DragSession) {
+                ((DragSession) localState).recordGridPoint(gx, gy);
+            }
+        }
+
+        private boolean handleDropOnGrid(float gx, float gy, DesktopShortcutItem targetItem, DragEvent event) {
+            int[] slot = gridCoordsToSlot(gx, gy);
+            View slotView = findViewAtSlot(slot[0], slot[1]);
+            DesktopShortcutItem resolvedTarget = targetItem;
+            if (resolvedTarget == null && slotView != null && slotView.getTag() instanceof DesktopShortcutItem) {
+                resolvedTarget = (DesktopShortcutItem) slotView.getTag();
+            }
+            return handleDropOnSlot(slot[0], slot[1], resolvedTarget, gx, gy, event);
+        }
+
+        private boolean handleDropOnSlot(
+                int col,
+                int row,
+                DesktopShortcutItem targetItem,
+                float gx,
+                float gy,
+                DragEvent event) {
+            final Context ctx = getContext();
+            Object local = event.getLocalState();
+
+            if (local instanceof DragSession) {
+                final DragSession session = (DragSession) local;
+                session.recordGridPoint(gx, gy);
+                session.handledDrop = true;
+                float stationaryLimit = Math.max(ViewConfiguration.get(ctx).getScaledTouchSlop(), dpToPx(ctx, 10)) * 2.0f;
+                if (session.openMenuIfStationary
+                        && session.maxDistSq <= (stationaryLimit * stationaryLimit)
+                        && (targetItem == null || session.item.storageKey.equals(targetItem.storageKey))) {
+                    post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (session.sourceCell != null && session.sourceCell.isAttachedToWindow()) {
+                                selectCell(session.sourceCell, session.item);
+                                showShortcutContextMenu(ctx, session.sourceCell, session.item);
+                            }
+                        }
+                    });
+                    return true;
+                }
+
+                boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false);
+                if (freePlacement) {
+                    assignOrSwapSlot(ctx, session.item.storageKey, col, row);
+                    rebuildGrid();
+                    return true;
+                }
+                if (targetItem != null && !session.item.storageKey.equals(targetItem.storageKey)) {
+                    moveShortcut(ctx, session.item.storageKey, targetItem.storageKey);
+                    rebuildGrid();
+                } else if (targetItem == null) {
+                    moveShortcut(ctx, session.item.storageKey, null);
+                    rebuildGrid();
+                }
+                return true;
+            }
+
+            // External drop from One UI Home App Drawer / OverlayApps / Finder / OpenFolder
+            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false);
+            return handleExternalDragDrop(ctx, event, col, row, targetItem, freePlacement);
+        }
+
+        private void finishDragSession(DragEvent event) {
+            Object local = event.getLocalState();
+            if (local instanceof DragSession) {
+                final DragSession session = (DragSession) local;
+                if (session.sourceCell != null) {
+                    session.sourceCell.setAlpha(1.0f);
+                    restoreCellBackground(session.sourceCell);
+                }
+                if (session.openMenuIfStationary && !session.handledDrop) {
+                    Context ctx = getContext();
+                    float stationaryLimit = Math.max(ViewConfiguration.get(ctx).getScaledTouchSlop(), dpToPx(ctx, 10)) * 2.0f;
+                    if (session.maxDistSq <= (stationaryLimit * stationaryLimit)) {
+                        post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (session.sourceCell != null && session.sourceCell.isAttachedToWindow()) {
+                                    selectCell(session.sourceCell, session.item);
+                                    showShortcutContextMenu(getContext(), session.sourceCell, session.item);
+                                }
+                            }
+                        });
+                    }
+                }
+            } else {
+                sLastHoneyDragInfo = null;
+            }
+        }
+
+        private boolean handleExternalDragDrop(
+                Context ctx,
+                DragEvent event,
+                int targetCol,
+                int targetRow,
+                DesktopShortcutItem targetItem,
+                boolean freePlacement) {
+            Object dragInfo = extractHoneyDragInfo(event);
+            boolean anyAdded = false;
+            int colCursor = targetCol;
+            int rowCursor = targetRow;
+            int maxCols = Math.max(1, mCurrentCols);
+
+            if (dragInfo != null) {
+                try {
+                    Object dragItemsObj = XposedHelpers.callMethod(dragInfo, "getDragItems");
+                    if (dragItemsObj instanceof List<?>) {
+                        List<?> dragItems = (List<?>) dragItemsObj;
+                        for (Object dragItem : dragItems) {
+                            if (dragItem == null) continue;
+                            try {
+                                Object viewObj = XposedHelpers.callMethod(dragItem, "getView");
+                                if (viewObj instanceof View) {
+                                    final View srcView = (View) viewObj;
+                                    srcView.post(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            srcView.setVisibility(View.VISIBLE);
+                                            srcView.setAlpha(1.0f);
+                                        }
+                                    });
+                                }
+                            } catch (Throwable ignored) {}
+
+                            Object baseItem = null;
+                            try {
+                                baseItem = XposedHelpers.callMethod(dragItem, "getItem");
+                            } catch (Throwable ignored) {}
+                            if (baseItem != null) {
+                                String addedKey = addOrUpdateBaseItem(
+                                        ctx,
+                                        baseItem,
+                                        freePlacement ? colCursor : null,
+                                        freePlacement ? rowCursor : null,
+                                        dragItems.size() == 1,
+                                        false);
+                                if (addedKey != null) {
+                                    anyAdded = true;
+                                    if (!freePlacement && targetItem != null && !addedKey.equals(targetItem.storageKey)) {
+                                        moveShortcut(ctx, addedKey, targetItem.storageKey);
+                                    }
+                                    colCursor++;
+                                    if (colCursor >= maxCols) {
+                                        colCursor = 0;
+                                        rowCursor++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (anyAdded) {
+                        try {
+                            Object cb = XposedHelpers.callMethod(dragInfo, "getSuccessCallback");
+                            if (cb != null) XposedHelpers.callMethod(cb, "invoke");
+                        } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(ModConfig.TAG + ": handleExternalDragDrop(DragInfo) error: " + t);
+                }
+                sLastHoneyDragInfo = null;
+                if (anyAdded) {
+                    rebuildGrid();
+                    return true;
+                }
+            }
+
+            // Fallback: inspect ClipData intents (OverlayApps / add_icon_other_window / external drags)
+            ClipData clip = event.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    ClipData.Item ci = clip.getItemAt(i);
+                    if (ci == null) continue;
+                    Intent clipIntent = ci.getIntent();
+                    if (clipIntent != null) {
+                        String addedKey = addClipIntentToWorkspace(
+                                ctx,
+                                clipIntent,
+                                freePlacement ? colCursor : null,
+                                freePlacement ? rowCursor : null);
+                        if (addedKey != null) {
+                            anyAdded = true;
+                            if (!freePlacement && targetItem != null && !addedKey.equals(targetItem.storageKey)) {
+                                moveShortcut(ctx, addedKey, targetItem.storageKey);
+                            }
+                            colCursor++;
+                            if (colCursor >= maxCols) {
+                                colCursor = 0;
+                                rowCursor++;
+                            }
+                        }
+                    }
+                }
+                if (anyAdded) {
+                    rebuildGrid();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void setDropHighlight(View target) {
+            if (mHighlightedDropCell == target) return;
+            clearDropHighlight();
+            mHighlightedDropCell = target;
+            if (target != null) {
+                GradientDrawable dropBg = new GradientDrawable();
+                dropBg.setColor(Color.argb(72, 56, 189, 248));
+                dropBg.setCornerRadius(dpToPx(getContext(), 10));
+                dropBg.setStroke(dpToPx(getContext(), 2), Color.argb(220, 125, 211, 252));
+                target.setBackground(dropBg);
+            }
+        }
+
+        private void clearDropHighlight() {
+            View prev = mHighlightedDropCell;
+            mHighlightedDropCell = null;
+            if (prev != null) {
+                restoreCellBackground(prev);
+            }
         }
 
         private void restoreCellBackground(View cell) {
             if (cell == mSelectedCell) {
                 selectCell(cell, mSelectedItem);
-            } else if (mArrangeMode) {
-                applyArrangeIdleBackground(cell);
             } else {
                 cell.setBackground(null);
             }
@@ -1218,25 +1791,19 @@ public final class LauncherCustomDesktopHook {
         private void showShortcutContextMenu(final Context context, View anchor, final DesktopShortcutItem item) {
             final int idOpenWin = 1;
             final int idOpenFull = 2;
-            final int idMoveEarlier = 3;
-            final int idMoveLater = 4;
-            final int idArrange = 5;
-            final int idAppInfo = 6;
-            final int idRemove = 7;
-            final int idUninstall = 8;
+            final int idAppInfo = 3;
+            final int idRemove = 4;
+            final int idUninstall = 5;
 
             PopupMenu popup = new PopupMenu(context, anchor);
             popup.getMenu().add(0, idOpenWin, 0, "Open in window");
             popup.getMenu().add(0, idOpenFull, 1, "Open fullscreen");
-            popup.getMenu().add(0, idMoveEarlier, 2, "Move earlier");
-            popup.getMenu().add(0, idMoveLater, 3, "Move later");
-            popup.getMenu().add(0, idArrange, 4, mArrangeMode ? "Finish arranging" : "Arrange icons");
             if (!TextUtils.isEmpty(item.getPackageName())) {
-                popup.getMenu().add(0, idAppInfo, 5, "App info");
+                popup.getMenu().add(0, idAppInfo, 2, "App info");
             }
-            popup.getMenu().add(0, idRemove, 6, "Remove from workspace");
+            popup.getMenu().add(0, idRemove, 3, "Remove from workspace");
             if (!item.isCustomShortcut && item.component != null) {
-                popup.getMenu().add(0, idUninstall, 7, "Uninstall");
+                popup.getMenu().add(0, idUninstall, 4, "Uninstall");
             }
 
             popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
@@ -1248,17 +1815,6 @@ public final class LauncherCustomDesktopHook {
                         return true;
                     } else if (id == idOpenFull) {
                         launchShortcut(context, item, false);
-                        return true;
-                    } else if (id == idMoveEarlier) {
-                        stepShortcut(context, item.storageKey, -1);
-                        rebuildGrid();
-                        return true;
-                    } else if (id == idMoveLater) {
-                        stepShortcut(context, item.storageKey, 1);
-                        rebuildGrid();
-                        return true;
-                    } else if (id == idArrange) {
-                        setArrangeMode(!mArrangeMode);
                         return true;
                     } else if (id == idAppInfo) {
                         openAppInfo(context, item.getPackageName());
@@ -1284,15 +1840,17 @@ public final class LauncherCustomDesktopHook {
 
         private void showEmptyDesktopMenu(float x, float y) {
             final Context context = getContext();
+            int[] slot = viewCoordsToGridSlot(x, y);
+            mPendingAddCol = slot[0];
+            mPendingAddRow = slot[1];
             View anchor = prepareAnchorAt(x, y);
             PopupMenu popup = new PopupMenu(context, anchor);
             popup.getMenu().add(0, 1, 0, "Add app shortcut...");
-            popup.getMenu().add(0, 2, 1, mArrangeMode ? "Finish arranging" : "Arrange icons");
-            popup.getMenu().add(0, 3, 2, "Sort icons by name (A–Z)");
-            popup.getMenu().add(0, 4, 3, "Refresh workspace");
-            popup.getMenu().add(0, 5, 4, "Reset default shortcuts");
-            popup.getMenu().add(0, 6, 5, "Wallpaper & style");
-            popup.getMenu().add(0, 7, 6, "Dex+ Settings");
+            popup.getMenu().add(0, 2, 1, "Sort icons by name (A–Z)");
+            popup.getMenu().add(0, 3, 2, "Refresh workspace");
+            popup.getMenu().add(0, 4, 3, "Reset default shortcuts");
+            popup.getMenu().add(0, 5, 4, "Wallpaper & style");
+            popup.getMenu().add(0, 6, 5, "Dex+ Settings");
             popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
                 @Override
                 public boolean onMenuItemClick(android.view.MenuItem item) {
@@ -1301,27 +1859,20 @@ public final class LauncherCustomDesktopHook {
                             showAddAppShortcutDialog(context);
                             return true;
                         case 2:
-                            setArrangeMode(!mArrangeMode);
-                            return true;
-                        case 3:
                             sortShortcutsAlphabetically(context);
                             rebuildGrid();
                             return true;
-                        case 4:
+                        case 3:
                             rebuildGrid();
                             return true;
-                        case 5:
+                        case 4:
                             resetDesktopShortcuts(context);
                             rebuildGrid();
                             return true;
-                        case 6:
-                            try {
-                                Intent wp = new Intent(Intent.ACTION_SET_WALLPAPER);
-                                wp.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                                context.startActivity(wp);
-                            } catch (Throwable ignored) {}
+                        case 5:
+                            openWallpaperAndStyle(context);
                             return true;
-                        case 7:
+                        case 6:
                             openModuleSettings(context);
                             return true;
                     }
@@ -1450,6 +2001,12 @@ public final class LauncherCustomDesktopHook {
                         if (position >= 0 && position < filtered.size()) {
                             DesktopShortcutItem picked = filtered.get(position);
                             addShortcutToDesktop(context, picked.storageKey);
+                            if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false)
+                                    && mPendingAddCol >= 0 && mPendingAddRow >= 0) {
+                                assignOrSwapSlot(context, picked.storageKey, mPendingAddCol, mPendingAddRow);
+                                mPendingAddCol = -1;
+                                mPendingAddRow = -1;
+                            }
                             existingKeys.add(picked.storageKey);
                             adapter.notifyDataSetChanged();
                             rebuildGrid();
@@ -1713,8 +2270,235 @@ public final class LauncherCustomDesktopHook {
         } catch (Throwable ignored) {}
     }
 
+    private static boolean isSupportedDragEvent(DragEvent event) {
+        if (event == null) return false;
+        Object local = event.getLocalState();
+        if (local instanceof ClassicDexDesktopView.DragSession) return true;
+        if (extractHoneyDragInfo(event) != null) return true;
+        try {
+            if (event.getClipData() != null && event.getClipData().getItemCount() > 0) {
+                return true;
+            }
+            if (event.getClipDescription() != null) {
+                return event.getClipDescription().hasMimeType("text/vnd.android.intent")
+                        || event.getClipDescription().hasMimeType("text/plain");
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static boolean isHoneyDragInfo(Object obj) {
+        return obj != null && "com.honeyspace.sdk.DragInfo".equals(obj.getClass().getName());
+    }
+
+    private static Object extractHoneyDragInfo(DragEvent event) {
+        if (event != null && isHoneyDragInfo(event.getLocalState())) {
+            return event.getLocalState();
+        }
+        Object cached = sLastHoneyDragInfo;
+        if (isHoneyDragInfo(cached) && (SystemClock.uptimeMillis() - sLastHoneyDragTime) < 60000L) {
+            return cached;
+        }
+        return null;
+    }
+
+    private static String addClipIntentToWorkspace(Context ctx, Intent clipIntent, Integer targetCol, Integer targetRow) {
+        if (ctx == null || clipIntent == null) return null;
+        try {
+            // 1. Direct ComponentName inside ClipData intent
+            ComponentName cn = clipIntent.getComponent();
+            if (cn == null) {
+                Object compExtra = clipIntent.getParcelableExtra("android.intent.extra.COMPONENT_NAME");
+                if (compExtra instanceof ComponentName) cn = (ComponentName) compExtra;
+            }
+
+            // 2. Unwrap PendingIntent if Samsung DeX / OverlayApps packed EXTRA_PENDING_INTENT
+            if (cn == null && clipIntent.hasExtra("android.intent.extra.PENDING_INTENT")) {
+                Object piObj = clipIntent.getParcelableExtra("android.intent.extra.PENDING_INTENT");
+                if (piObj instanceof PendingIntent) {
+                    PendingIntent pi = (PendingIntent) piObj;
+                    try {
+                        Object inner = XposedHelpers.callMethod(pi, "getIntent");
+                        if (inner instanceof Intent && ((Intent) inner).getComponent() != null) {
+                            cn = ((Intent) inner).getComponent();
+                        }
+                    } catch (Throwable ignored) {}
+                    if (cn == null) {
+                        String creatorPkg = pi.getCreatorPackage();
+                        if (!TextUtils.isEmpty(creatorPkg)) {
+                            Intent launch = ctx.getPackageManager().getLaunchIntentForPackage(creatorPkg);
+                            if (launch != null) cn = launch.getComponent();
+                        }
+                    }
+                }
+            }
+
+            if (cn != null) {
+                String flat = cn.flattenToString();
+                addShortcutToDesktop(ctx, flat);
+                if (targetCol != null && targetRow != null) {
+                    assignOrSwapSlot(ctx, flat, targetCol, targetRow);
+                }
+                return flat;
+            }
+
+            // 3. Pinned / deep shortcut extras packed in ClipData intent
+            String scId = clipIntent.getStringExtra("shortcut_id");
+            if (TextUtils.isEmpty(scId)) scId = clipIntent.getStringExtra("android.intent.extra.shortcut.ID");
+            String pkg = clipIntent.getStringExtra(Intent.EXTRA_PACKAGE_NAME);
+            if (TextUtils.isEmpty(pkg)) pkg = clipIntent.getPackage();
+            if (!TextUtils.isEmpty(scId) && !TextUtils.isEmpty(pkg)) {
+                Intent deep = new Intent(Intent.ACTION_MAIN);
+                deep.addCategory("com.android.launcher3.DEEP_SHORTCUT");
+                deep.setPackage(pkg);
+                deep.putExtra("shortcut_id", scId);
+                String label = clipIntent.getStringExtra(Intent.EXTRA_SHORTCUT_NAME);
+                if (TextUtils.isEmpty(label)) label = pkg;
+                String key = buildCustomShortcutStorageKey(label, deep);
+                saveAndAddCustomShortcut(ctx, key, label, deep, null, pkg);
+                if (targetCol != null && targetRow != null) {
+                    assignOrSwapSlot(ctx, key, targetCol, targetRow);
+                }
+                return key;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": addClipIntentToWorkspace error: " + t);
+        }
+        return null;
+    }
+
+    private static Map<String, int[]> loadShortcutPositions(Context context) {
+        Map<String, int[]> map = new HashMap<>();
+        String raw = getDesktopPrefs(context).getString(KEY_SHORTCUT_POSITIONS, "");
+        if (TextUtils.isEmpty(raw)) return map;
+        for (String line : raw.split("\n")) {
+            int tab = line.lastIndexOf('\t');
+            if (tab <= 0 || tab >= line.length() - 1) continue;
+            String key = line.substring(0, tab);
+            String[] coords = line.substring(tab + 1).split(",");
+            if (coords.length != 2) continue;
+            try {
+                int c = Integer.parseInt(coords[0].trim());
+                int r = Integer.parseInt(coords[1].trim());
+                if (c >= 0 && r >= 0) {
+                    map.put(key, new int[]{c, r});
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return map;
+    }
+
+    private static void saveShortcutPositions(Context context, Map<String, int[]> positions) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, int[]> e : positions.entrySet()) {
+            String key = e.getKey();
+            int[] pos = e.getValue();
+            if (TextUtils.isEmpty(key) || pos == null || pos.length != 2) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(key).append('\t').append(pos[0]).append(',').append(pos[1]);
+        }
+        getDesktopPrefs(context).edit().putString(KEY_SHORTCUT_POSITIONS, sb.toString()).commit();
+    }
+
+    private static Map<String, int[]> resolveGridPlacements(
+            Context context,
+            List<DesktopShortcutItem> items,
+            int cols,
+            int minRows) {
+        Map<String, int[]> saved = loadShortcutPositions(context);
+        Map<String, int[]> resolved = new HashMap<>();
+        Set<String> occupied = new HashSet<>();
+        boolean dirty = false;
+
+        // First keep any valid saved non-colliding positions
+        for (DesktopShortcutItem item : items) {
+            int[] pos = saved.get(item.storageKey);
+            if (pos != null && pos[0] >= 0 && pos[0] < cols && pos[1] >= 0) {
+                String slotId = pos[0] + "," + pos[1];
+                if (occupied.add(slotId)) {
+                    resolved.put(item.storageKey, new int[]{pos[0], pos[1]});
+                } else {
+                    dirty = true;
+                }
+            }
+        }
+
+        // Assign first free column-major slots for new or colliding items
+        for (DesktopShortcutItem item : items) {
+            if (resolved.containsKey(item.storageKey)) continue;
+            dirty = true;
+            int[] free = findFirstFreeSlot(occupied, cols, minRows);
+            occupied.add(free[0] + "," + free[1]);
+            resolved.put(item.storageKey, free);
+        }
+
+        if (dirty || saved.size() != resolved.size()) {
+            saveShortcutPositions(context, resolved);
+        }
+        return resolved;
+    }
+
+    private static int[] findFirstFreeSlot(Set<String> occupied, int cols, int minRows) {
+        for (int c = 0; c < cols; c++) {
+            for (int r = 0; r < minRows; r++) {
+                if (!occupied.contains(c + "," + r)) {
+                    return new int[]{c, r};
+                }
+            }
+        }
+        for (int r = minRows; ; r++) {
+            for (int c = 0; c < cols; c++) {
+                if (!occupied.contains(c + "," + r)) {
+                    return new int[]{c, r};
+                }
+            }
+        }
+    }
+
+    private static void assignOrSwapSlot(Context context, String draggedKey, int targetCol, int targetRow) {
+        if (context == null || TextUtils.isEmpty(draggedKey) || targetCol < 0 || targetRow < 0) return;
+        int cols = Math.max(6, Math.min(16, ModConfig.getInt(context, ModConfig.KEY_DESKTOP_GRID_COLS, 10)));
+        int rows = Math.max(4, Math.min(10, ModConfig.getInt(context, ModConfig.KEY_DESKTOP_GRID_ROWS, 5)));
+        int clampedCol = Math.min(cols - 1, targetCol);
+
+        List<DesktopShortcutItem> items = loadDesktopShortcuts(context, cols * rows);
+        Map<String, int[]> placements = resolveGridPlacements(context, items, cols, rows);
+
+        int[] draggedOldPos = placements.get(draggedKey);
+        String occupantKey = null;
+        for (Map.Entry<String, int[]> e : placements.entrySet()) {
+            int[] pos = e.getValue();
+            if (pos != null && pos[0] == clampedCol && pos[1] == targetRow) {
+                occupantKey = e.getKey();
+                break;
+            }
+        }
+
+        if (draggedKey.equals(occupantKey)) return;
+
+        if (occupantKey != null) {
+            if (draggedOldPos != null) {
+                placements.put(occupantKey, new int[]{draggedOldPos[0], draggedOldPos[1]});
+            } else {
+                Set<String> occupied = new HashSet<>();
+                for (Map.Entry<String, int[]> e : placements.entrySet()) {
+                    if (!occupantKey.equals(e.getKey())) {
+                        occupied.add(e.getValue()[0] + "," + e.getValue()[1]);
+                    }
+                }
+                occupied.add(clampedCol + "," + targetRow);
+                placements.put(occupantKey, findFirstFreeSlot(occupied, cols, rows));
+            }
+        }
+        placements.put(draggedKey, new int[]{clampedCol, targetRow});
+        saveShortcutPositions(context, placements);
+    }
+
     private static void resetDesktopShortcuts(Context context) {
-        getDesktopPrefs(context).edit().remove(KEY_SHORTCUT_LIST).commit();
+        getDesktopPrefs(context).edit()
+                .remove(KEY_SHORTCUT_LIST)
+                .remove(KEY_SHORTCUT_POSITIONS)
+                .commit();
         try {
             File dir = new File(context.getFilesDir(), CUSTOM_SHORTCUT_DIR);
             if (dir.exists()) {
@@ -1813,6 +2597,10 @@ public final class LauncherCustomDesktopHook {
         List<String> keys = readSavedKeyOrder(context);
         keys.remove(storageKey);
         saveShortcutList(context, new LinkedHashSet<>(keys));
+        Map<String, int[]> positions = loadShortcutPositions(context);
+        if (positions.remove(storageKey) != null) {
+            saveShortcutPositions(context, positions);
+        }
         deleteCustomShortcutFiles(context, storageKey);
     }
 
@@ -1845,21 +2633,6 @@ public final class LauncherCustomDesktopHook {
         saveShortcutList(context, new LinkedHashSet<>(order));
     }
 
-    private static void stepShortcut(Context context, String storageKey, int delta) {
-        List<DesktopShortcutItem> current = loadDesktopShortcuts(context, 200);
-        List<String> order = new ArrayList<>();
-        for (DesktopShortcutItem item : current) {
-            order.add(item.storageKey);
-        }
-        int idx = order.indexOf(storageKey);
-        if (idx < 0) return;
-        int nextIdx = Math.max(0, Math.min(order.size() - 1, idx + delta));
-        if (nextIdx == idx) return;
-        order.remove(idx);
-        order.add(nextIdx, storageKey);
-        saveShortcutList(context, new LinkedHashSet<>(order));
-    }
-
     private static void sortShortcutsAlphabetically(Context context) {
         List<DesktopShortcutItem> current = loadDesktopShortcuts(context, 200);
         Collections.sort(current, new Comparator<DesktopShortcutItem>() {
@@ -1873,6 +2646,14 @@ public final class LauncherCustomDesktopHook {
             set.add(item.storageKey);
         }
         saveShortcutList(context, set);
+        if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false)) {
+            int rows = Math.max(4, Math.min(10, ModConfig.getInt(context, ModConfig.KEY_DESKTOP_GRID_ROWS, 5)));
+            Map<String, int[]> sortedPos = new HashMap<>();
+            for (int i = 0; i < current.size(); i++) {
+                sortedPos.put(current.get(i).storageKey, new int[]{i / rows, i % rows});
+            }
+            saveShortcutPositions(context, sortedPos);
+        }
     }
 
     private static void saveShortcutList(Context context, Set<String> keys) {
@@ -1887,6 +2668,51 @@ public final class LauncherCustomDesktopHook {
 
     private static void launchShortcut(Context context, DesktopShortcutItem item, boolean freeform) {
         try {
+            ActivityOptions opts = ActivityOptions.makeBasic();
+            if (freeform) {
+                try {
+                    XposedHelpers.callMethod(opts, "setLaunchWindowingMode", 5); // WINDOWING_MODE_FREEFORM = 5
+                } catch (Throwable ignored) {}
+            }
+
+            if (item.isCustomShortcut && item.customIntent != null) {
+                Intent scIntent = item.customIntent;
+                if (scIntent.hasCategory("com.android.launcher3.DEEP_SHORTCUT")) {
+                    String shortcutId = scIntent.getStringExtra("shortcut_id");
+                    if (TextUtils.isEmpty(shortcutId)) {
+                        shortcutId = scIntent.getStringExtra("android.intent.extra.shortcut.ID");
+                    }
+                    String scPkg = scIntent.getPackage();
+                    if (TextUtils.isEmpty(scPkg) && scIntent.getComponent() != null) {
+                        scPkg = scIntent.getComponent().getPackageName();
+                    }
+                    if (TextUtils.isEmpty(scPkg)) {
+                        scPkg = item.customPackage;
+                    }
+                    if (!TextUtils.isEmpty(scPkg) && !TextUtils.isEmpty(shortcutId)) {
+                        LauncherApps la = (LauncherApps) context.getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                        if (la != null) {
+                            UserHandle user = Process.myUserHandle();
+                            if (scIntent.hasExtra("userid")) {
+                                int uid = scIntent.getIntExtra("userid", -1);
+                                if (uid >= 0) {
+                                    try {
+                                        user = (UserHandle) XposedHelpers.callStaticMethod(
+                                                UserHandle.class, "of", uid);
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                            try {
+                                la.startShortcut(scPkg, shortcutId, null, opts.toBundle(), user);
+                                return;
+                            } catch (Throwable t) {
+                                XposedBridge.log(ModConfig.TAG + ": startShortcut failed for " + scPkg + "/" + shortcutId + ": " + t);
+                            }
+                        }
+                    }
+                }
+            }
+
             Intent intent;
             if (item.isCustomShortcut && item.customIntent != null) {
                 intent = new Intent(item.customIntent);
@@ -1896,13 +2722,6 @@ public final class LauncherCustomDesktopHook {
                 intent.addCategory(Intent.CATEGORY_LAUNCHER);
                 intent.setComponent(item.component);
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            }
-
-            ActivityOptions opts = ActivityOptions.makeBasic();
-            if (freeform) {
-                try {
-                    XposedHelpers.callMethod(opts, "setLaunchWindowingMode", 5); // WINDOWING_MODE_FREEFORM = 5
-                } catch (Throwable ignored) {}
             }
             context.startActivity(intent, opts.toBundle());
         } catch (Throwable t) {
@@ -1922,6 +2741,27 @@ public final class LauncherCustomDesktopHook {
             } catch (Throwable ignored) {}
             context.startActivity(intent, opts.toBundle());
         } catch (Throwable ignored) {}
+    }
+
+    private static void openWallpaperAndStyle(Context context) {
+        Intent[] candidates = new Intent[]{
+                new Intent("com.samsung.intent.action.WALLPAPER_SETTING")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                new Intent()
+                        .setComponent(new ComponentName(
+                                "com.samsung.android.app.dressroom",
+                                "com.samsung.android.app.dressroom.presentation.settings.WallpaperSettingActivity"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), "Wallpaper & style")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        };
+        for (Intent candidate : candidates) {
+            try {
+                context.startActivity(candidate);
+                return;
+            } catch (Throwable ignored) {}
+        }
+        Toast.makeText(context, "Unable to open Wallpaper & style", Toast.LENGTH_SHORT).show();
     }
 
     private static void openModuleSettings(Context context) {

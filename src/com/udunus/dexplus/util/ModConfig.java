@@ -67,6 +67,7 @@ public final class ModConfig {
     public static final String KEY_DESKTOP_ICON_SCALE = "desktop_icon_scale";
     public static final String KEY_DESKTOP_DOUBLE_CLICK = "desktop_double_click";
     public static final String KEY_DESKTOP_FREEFORM_LAUNCH = "desktop_freeform_launch";
+    public static final String KEY_DESKTOP_FREE_PLACEMENT = "desktop_free_placement";
 
     // Window Decorations & Status Bar (SystemUI)
     public static final String KEY_HIDE_STATUS_BAR = "hide_status_bar";
@@ -121,6 +122,7 @@ public final class ModConfig {
         defaults.put(KEY_DESKTOP_ICON_SCALE, 100);
         defaults.put(KEY_DESKTOP_DOUBLE_CLICK, false);
         defaults.put(KEY_DESKTOP_FREEFORM_LAUNCH, true);
+        defaults.put(KEY_DESKTOP_FREE_PLACEMENT, false);
 
         defaults.put(KEY_HIDE_STATUS_BAR, true);
         defaults.put(KEY_TOP_EDGE_MAXIMIZE, true);

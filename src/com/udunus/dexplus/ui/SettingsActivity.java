@@ -632,6 +632,10 @@ public class SettingsActivity extends Activity {
                 "Launches apps from the dedicated workspace directly in freeform desktop windows.",
                 ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true, true);
         addSwitchRow(wsCard,
+                "Free Grid Placement",
+                "Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left.",
+                ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false, true);
+        addSwitchRow(wsCard,
                 "Double-Click to Open Shortcuts",
                 "First tap or click selects the shortcut; double-click opens the app.",
                 ModConfig.KEY_DESKTOP_DOUBLE_CLICK, false, false);
