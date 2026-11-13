@@ -45,6 +45,7 @@ public class SettingsActivity extends Activity {
     private int mTextSecondary;
     private int mAccentColor;
     private int mDividerColor;
+    private boolean mIsCompact;
 
     private int mSelectedTab = 0;
     private final List<LinearLayout> mTabButtons = new ArrayList<>();
@@ -98,13 +99,14 @@ public class SettingsActivity extends Activity {
         mAccentColor = Color.rgb(59, 130, 246);
         mDividerColor = mIsDark ? Color.argb(28, 255, 255, 255) : Color.argb(22, 0, 0, 0);
 
-        boolean compact = getResources().getConfiguration().screenWidthDp < 600;
+        mIsCompact = getResources().getConfiguration().screenWidthDp < 600;
+        boolean compact = mIsCompact;
 
         LinearLayout rootSplit = new LinearLayout(this);
-        rootSplit.setOrientation(compact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        rootSplit.setOrientation(mIsCompact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         rootSplit.setBackgroundColor(mBgColor);
 
-        if (compact) {
+        if (mIsCompact) {
             rootSplit.addView(buildCompactTopBar(), new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             View topDivider = new View(this);
@@ -468,7 +470,7 @@ public class SettingsActivity extends Activity {
         actionsCard.addView(actionsDesc, descLp);
 
         LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.setOrientation(mIsCompact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
 
         Button restartHomeBtn = createStyledButton("Restart Home Screen",
                 mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
@@ -480,10 +482,12 @@ public class SettingsActivity extends Activity {
                 Toast.makeText(SettingsActivity.this, "Restarting One UI Home...", Toast.LENGTH_SHORT).show();
             }
         });
-        row1.addView(restartHomeBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row1.addView(restartHomeBtn, mIsCompact
+                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         View sp1 = new View(this);
-        row1.addView(sp1, new LinearLayout.LayoutParams(dp(10), dp(1)));
+        row1.addView(sp1, new LinearLayout.LayoutParams(mIsCompact ? dp(1) : dp(10), mIsCompact ? dp(8) : dp(1)));
 
         Button restartSysUiBtn = createStyledButton("Restart System UI",
                 mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
@@ -495,10 +499,12 @@ public class SettingsActivity extends Activity {
                 Toast.makeText(SettingsActivity.this, "Restarting System UI...", Toast.LENGTH_SHORT).show();
             }
         });
-        row1.addView(restartSysUiBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row1.addView(restartSysUiBtn, mIsCompact
+                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         View sp2 = new View(this);
-        row1.addView(sp2, new LinearLayout.LayoutParams(dp(10), dp(1)));
+        row1.addView(sp2, new LinearLayout.LayoutParams(mIsCompact ? dp(1) : dp(10), mIsCompact ? dp(8) : dp(1)));
 
         Button resetBtn = createStyledButton("Restore Defaults",
                 mIsDark ? Color.rgb(68, 38, 48) : Color.rgb(254, 226, 226),
@@ -522,7 +528,9 @@ public class SettingsActivity extends Activity {
                         .show();
             }
         });
-        row1.addView(resetBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row1.addView(resetBtn, mIsCompact
+                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         actionsCard.addView(row1);
         page.addView(actionsCard);
@@ -617,7 +625,7 @@ public class SettingsActivity extends Activity {
         LinearLayout wsCard = createCard();
         addSwitchRow(wsCard,
                 "Enable Dedicated Workspace",
-                "Replaces the standard home screen pages and widgets with a clean, full-screen desktop shortcut grid. Right-click or long-press anywhere to add or remove shortcuts.",
+                "Replaces the standard home screen with a full-screen shortcut grid. Supports right-click menus, drag-and-drop arranging, and automatic \"Add to Home\" redirection.",
                 ModConfig.KEY_CUSTOM_DESKTOP_ENABLED, false, true);
         addSwitchRow(wsCard,
                 "Open Shortcuts in Resizable Windows",
@@ -747,7 +755,7 @@ public class SettingsActivity extends Activity {
         addSeekBarRow(titleBarCard,
                 "Window corner radius",
                 "Rounds window corners. 0 is square.",
-                ModConfig.KEY_WINDOW_CORNER_RADIUS, 0, 48, systemCornerDp(), " dp", false);
+                ModConfig.KEY_WINDOW_CORNER_RADIUS, 0, 48, systemCornerDp(), " dp", false, true);
         page.addView(titleBarCard);
 
         addSectionLabel(page, "APP ICON WINDOW MENU");
@@ -926,6 +934,20 @@ public class SettingsActivity extends Activity {
             int defaultVal,
             final String unitSuffix,
             boolean showDivider) {
+        addSeekBarRow(card, title, summary, key, minVal, maxVal, defaultVal, unitSuffix, showDivider, false);
+    }
+
+    private void addSeekBarRow(
+            LinearLayout card,
+            String title,
+            String summary,
+            final String key,
+            final int minVal,
+            final int maxVal,
+            final int defaultVal,
+            final String unitSuffix,
+            boolean showDivider,
+            final boolean allowReset) {
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
         int padH = dp(18);
@@ -944,15 +966,46 @@ public class SettingsActivity extends Activity {
         headerRow.addView(titleTv, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        int curVal = mPrefs.getInt(key, defaultVal);
+        final int clampedDefault = Math.max(minVal, Math.min(maxVal, defaultVal));
+        int curVal = mPrefs.getInt(key, clampedDefault);
         curVal = Math.max(minVal, Math.min(maxVal, curVal));
+        final boolean usingSystemDefault = allowReset && !mPrefs.contains(key);
 
         final TextView valTv = new TextView(this);
-        valTv.setText(curVal + unitSuffix);
+        valTv.setText(usingSystemDefault ? ("Default (" + clampedDefault + unitSuffix + ")") : (curVal + unitSuffix));
         valTv.setTextColor(mAccentColor);
         valTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
         valTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         headerRow.addView(valTv);
+
+        final SeekBar sb = new SeekBar(this);
+        sb.setMax(maxVal - minVal);
+        sb.setProgress(curVal - minVal);
+
+        if (allowReset) {
+            TextView resetChip = new TextView(this);
+            resetChip.setText("Reset");
+            resetChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+            resetChip.setTextColor(mTextSecondary);
+            resetChip.setPadding(dp(8), dp(2), dp(8), dp(2));
+            GradientDrawable chipBg = new GradientDrawable();
+            chipBg.setColor(mIsDark ? Color.argb(40, 255, 255, 255) : Color.argb(20, 0, 0, 0));
+            chipBg.setCornerRadius(dp(10));
+            resetChip.setBackground(chipBg);
+            LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            chipLp.setMarginStart(dp(8));
+            resetChip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    mPrefs.edit().remove(key).commit();
+                    sb.setProgress(clampedDefault - minVal);
+                    valTv.setText("Default (" + clampedDefault + unitSuffix + ")");
+                    ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
+                }
+            });
+            headerRow.addView(resetChip, chipLp);
+        }
 
         container.addView(headerRow);
 
@@ -966,15 +1019,13 @@ public class SettingsActivity extends Activity {
         sumLp.bottomMargin = dp(6);
         container.addView(sumTv, sumLp);
 
-        SeekBar sb = new SeekBar(this);
-        sb.setMax(maxVal - minVal);
-        sb.setProgress(curVal - minVal);
         ColorStateList accentTint = ColorStateList.valueOf(mAccentColor);
         sb.setThumbTintList(accentTint);
         sb.setProgressTintList(accentTint);
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (!fromUser && allowReset && !mPrefs.contains(key)) return;
                 int v = minVal + progress;
                 valTv.setText(v + unitSuffix);
             }
@@ -986,6 +1037,7 @@ public class SettingsActivity extends Activity {
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int v = minVal + seekBar.getProgress();
                 mPrefs.edit().putInt(key, v).commit();
+                valTv.setText(v + unitSuffix);
                 ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
             }
         });
