@@ -18,6 +18,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -60,16 +61,14 @@ public class SettingsActivity extends Activity {
     private static final String[] TAB_NAMES = new String[]{
             "General",
             "Taskbar & Panels",
-            "Home Screen",
-            "Dedicated Workspace",
+            "Desktop",
             "Window Controls"
     };
 
     private static final String[] TAB_SUMMARIES = new String[]{
             "Activation, keyboard options & quick actions",
             "Desktop taskbar, notification panels & scaling",
-            "Icon-fit grid, workspace margins & gesture locks",
-            "Full-screen shortcut grid & launch behavior",
+            "Desktop icons, placement, folder sync & launch behavior",
             "Title bar buttons, pinning, menu tools & sizing"
     };
 
@@ -168,8 +167,7 @@ public class SettingsActivity extends Activity {
         mTabPages.clear();
         mTabPages.add(buildGeneralPage());
         mTabPages.add(buildTaskbarPage());
-        mTabPages.add(buildHomeScreenPage());
-        mTabPages.add(buildDedicatedWorkspacePage());
+        mTabPages.add(buildDesktopPage());
         mTabPages.add(buildWindowControlsPage());
 
         for (int i = 0; i < mTabPages.size(); i++) {
@@ -461,7 +459,7 @@ public class SettingsActivity extends Activity {
         actionsCard.setPadding(pad, pad, pad, pad);
 
         TextView actionsDesc = new TextView(this);
-        actionsDesc.setText("Changes apply as soon as you toggle them. Restart Home or System UI when a layout or the title bar needs a fresh start.");
+        actionsDesc.setText("Changes apply as soon as you toggle them. Restart Desktop or System UI when a layout or the title bar needs a fresh start.");
         actionsDesc.setTextColor(mTextSecondary);
         actionsDesc.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
@@ -472,7 +470,7 @@ public class SettingsActivity extends Activity {
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(mIsCompact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
 
-        Button restartHomeBtn = createStyledButton("Restart Home Screen",
+        Button restartHomeBtn = createStyledButton("Restart Desktop",
                 mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
         restartHomeBtn.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -576,107 +574,104 @@ public class SettingsActivity extends Activity {
         return page;
     }
 
-    private View buildHomeScreenPage() {
+    private View buildDesktopPage() {
         LinearLayout page = createPageContainer();
 
-        addSectionLabel(page, "HOME SCREEN BEHAVIOR");
-        LinearLayout behaviorCard = createCard();
-        addSwitchRow(behaviorCard,
-                "Hide Page Navigation Arrows",
-                "Hides the left and right page indicator arrows on the home screen.",
-                ModConfig.KEY_HIDE_PAGE_ARROWS, true, true);
-        addSwitchRow(behaviorCard,
-                "Lock Home Screen Gestures",
-                "Prevents upward app drawer swipes and two-finger pinch edit gestures while in desktop mode.",
-                ModConfig.KEY_BLOCK_HOME_GESTURES, true, false);
-        page.addView(behaviorCard);
-
-        addSectionLabel(page, "ICON SIZE");
-        LinearLayout iconCard = createCard();
-        addSeekBarRow(iconCard,
-                "Icon size",
-                "Size of the icons on the home screen. The grid keeps as many as still fit at this size (Default: 100%).",
-                ModConfig.KEY_HOME_ICON_SCALE, 60, 160, 100, "%", false);
-        page.addView(iconCard);
-
-        addSectionLabel(page, "WORKSPACE MARGINS");
-        LinearLayout marginCard = createCard();
-        addSeekBarRow(marginCard,
-                "Side Margins",
-                "Horizontal padding on the left and right edges of the home screen (Default: 40%).",
-                ModConfig.KEY_SIDE_MARGIN_PCT, 0, 100, 40, "%", true);
-        addSeekBarRow(marginCard,
-                "Top Margin",
-                "Top padding above the home screen grid (Default: 0%).",
-                ModConfig.KEY_TOP_MARGIN_PCT, 0, 100, 0, "%", true);
-        addSeekBarRow(marginCard,
-                "Bottom Margin",
-                "Extra space between the home screen icons and the taskbar. 0% sits the grid on the taskbar (Default: 100%).",
-                ModConfig.KEY_BOTTOM_MARGIN_PCT, 0, 100, 100, "%", false);
-        page.addView(marginCard);
-
-        return page;
-    }
-
-    private View buildDedicatedWorkspacePage() {
-        LinearLayout page = createPageContainer();
-
-        addSectionLabel(page, "DEDICATED WORKSPACE");
+        addSectionLabel(page, "DESKTOP");
         LinearLayout wsCard = createCard();
         addSwitchRow(wsCard,
-                "Enable Dedicated Workspace",
-                "Replaces the standard home screen with a full-screen shortcut grid. Supports right-click menus, drag-and-drop arranging, and automatic \"Add to Home\" redirection.",
-                ModConfig.KEY_CUSTOM_DESKTOP_ENABLED, false, true);
-        addSwitchRow(wsCard,
                 "Open Shortcuts in Resizable Windows",
-                "Launches apps from the dedicated workspace directly in freeform desktop windows.",
+                "Launches apps from the desktop directly in freeform windows.",
                 ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true, true);
         addSwitchRow(wsCard,
                 "Free Grid Placement",
                 "Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left.",
-                ModConfig.KEY_DESKTOP_FREE_PLACEMENT, false, true);
+                ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true, true);
         addSwitchRow(wsCard,
                 "Double-Click to Open Shortcuts",
                 "First tap or click selects the shortcut; double-click opens the app.",
-                ModConfig.KEY_DESKTOP_DOUBLE_CLICK, false, false);
+                ModConfig.KEY_DESKTOP_DOUBLE_CLICK, true, true);
+        addSwitchRow(wsCard,
+                "File-Based Desktop",
+                "Uses a real folder on internal storage where each shortcut is a .dexsc file and any folders, videos, images, or files appear directly on the desktop.",
+                ModConfig.KEY_DESKTOP_FILE_BASED, false, true);
+        addFolderPathRow(wsCard,
+                "Desktop Folder Path",
+                ModConfig.KEY_DESKTOP_FOLDER_PATH,
+                ModConfig.DEFAULT_DESKTOP_FOLDER_PATH);
         page.addView(wsCard);
 
-        addSectionLabel(page, "WORKSPACE GRID & ICON SIZE");
+        addSectionLabel(page, "ICON SIZE");
         LinearLayout gridCard = createCard();
         addSeekBarRow(gridCard,
-                "Workspace Columns",
-                "Number of shortcut columns across the dedicated workspace (Default: 10).",
-                ModConfig.KEY_DESKTOP_GRID_COLS, 6, 16, 10, " cols", true);
-        addSeekBarRow(gridCard,
-                "Workspace Rows",
-                "Number of shortcut rows from top to bottom (Default: 5).",
-                ModConfig.KEY_DESKTOP_GRID_ROWS, 4, 10, 5, " rows", true);
-        addSeekBarRow(gridCard,
-                "Shortcut Icon Size",
-                "Scales shortcut icons and labels on the dedicated workspace (Default: 100%).",
+                "Desktop Icon Size",
+                "Scales desktop icons and labels and automatically fills available space (Default: 100%).",
                 ModConfig.KEY_DESKTOP_ICON_SCALE, 70, 140, 100, "%", false);
         page.addView(gridCard);
 
         addSectionLabel(page, "SHORTCUT MANAGEMENT");
         LinearLayout resetCard = createCard();
         int pad = dp(18);
-        resetCard.setPadding(pad, pad, pad, pad);
+
+        LinearLayout importRow = new LinearLayout(this);
+        importRow.setOrientation(LinearLayout.HORIZONTAL);
+        importRow.setGravity(Gravity.CENTER_VERTICAL);
+        importRow.setPadding(pad, pad, pad, pad);
+
+        LinearLayout importCol = new LinearLayout(this);
+        importCol.setOrientation(LinearLayout.VERTICAL);
+        TextView importTitle = new TextView(this);
+        importTitle.setText("Create Classic Icons in Desktop Folder");
+        importTitle.setTextColor(mTextPrimary);
+        importTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        importTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        importCol.addView(importTitle);
+
+        TextView importSum = new TextView(this);
+        importSum.setText("Creates .dexsc shortcut files in your Desktop folder from your classic desktop icons.");
+        importSum.setTextColor(mTextSecondary);
+        importSum.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
+        LinearLayout.LayoutParams importSumLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        importSumLp.topMargin = dp(3);
+        importCol.addView(importSum, importSumLp);
+
+        importRow.addView(importCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button importBtn = createStyledButton("Create Files",
+                mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
+        importBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent cmd = new Intent(ModConfig.ACTION_DESKTOP_COMMAND);
+                cmd.putExtra("command", "import_legacy_shortcuts");
+                sendBroadcast(cmd);
+            }
+        });
+        LinearLayout.LayoutParams importBtnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        importBtnLp.setMarginStart(dp(12));
+        importRow.addView(importBtn, importBtnLp);
+        resetCard.addView(importRow);
+
+        addDivider(resetCard);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(pad, pad, pad, pad);
 
         LinearLayout textCol = new LinearLayout(this);
         textCol.setOrientation(LinearLayout.VERTICAL);
         TextView t = new TextView(this);
-        t.setText("Reset Workspace Shortcuts");
+        t.setText("Reset Desktop Shortcuts");
         t.setTextColor(mTextPrimary);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         textCol.addView(t);
 
         TextView s = new TextView(this);
-        s.setText("Restores the default set of app shortcuts on the dedicated workspace.");
+        s.setText("Resets desktop shortcuts back to only the System Settings icon.");
         s.setTextColor(mTextSecondary);
         s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
         LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(
@@ -692,8 +687,8 @@ public class SettingsActivity extends Activity {
             @Override
             public void onClick(View v) {
                 new AlertDialog.Builder(SettingsActivity.this)
-                        .setTitle("Reset Workspace Shortcuts")
-                        .setMessage("Restore the default set of app shortcuts on the dedicated workspace?")
+                        .setTitle("Reset Desktop Shortcuts")
+                        .setMessage("Reset desktop shortcuts back to only the System Settings icon?")
                         .setPositiveButton("Reset", new DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(DialogInterface dialog, int which) {
@@ -701,7 +696,7 @@ public class SettingsActivity extends Activity {
                                 cmd.putExtra("command", "reset_shortcuts");
                                 sendBroadcast(cmd);
                                 Toast.makeText(SettingsActivity.this,
-                                        "Workspace shortcuts reset to defaults", Toast.LENGTH_SHORT).show();
+                                        "Desktop shortcuts reset", Toast.LENGTH_SHORT).show();
                             }
                         })
                         .setNegativeButton("Cancel", null)
@@ -938,7 +933,7 @@ public class SettingsActivity extends Activity {
             int defaultVal,
             final String unitSuffix,
             boolean showDivider) {
-        addSeekBarRow(card, title, summary, key, minVal, maxVal, defaultVal, unitSuffix, showDivider, false);
+        addSeekBarRow(card, title, summary, key, minVal, maxVal, defaultVal, unitSuffix, showDivider, true);
     }
 
     private void addSeekBarRow(
@@ -1051,6 +1046,99 @@ public class SettingsActivity extends Activity {
         if (showDivider) {
             addDivider(card);
         }
+    }
+
+    private void addFolderPathRow(
+            LinearLayout card,
+            final String title,
+            final String key,
+            final String defaultPath) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(18), dp(14), dp(18), dp(14));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView titleTv = new TextView(this);
+        titleTv.setText(title);
+        titleTv.setTextColor(mTextPrimary);
+        titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        titleTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        textCol.addView(titleTv);
+
+        final TextView pathTv = new TextView(this);
+        String current = mPrefs.getString(key, defaultPath);
+        if (current == null || current.trim().isEmpty()) {
+            current = defaultPath;
+        }
+        pathTv.setText(current);
+        pathTv.setTextColor(mAccentColor);
+        pathTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pathLp.topMargin = dp(2);
+        textCol.addView(pathTv, pathLp);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button changeBtn = createStyledButton("Change",
+                mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
+        View.OnClickListener openPicker = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final EditText input = new EditText(SettingsActivity.this);
+                String cur = mPrefs.getString(key, defaultPath);
+                input.setText(cur != null ? cur : defaultPath);
+                input.setSingleLine(true);
+                input.setSelection(input.getText().length());
+
+                LinearLayout wrap = new LinearLayout(SettingsActivity.this);
+                wrap.setOrientation(LinearLayout.VERTICAL);
+                wrap.setPadding(dp(20), dp(10), dp(20), dp(4));
+                wrap.addView(input);
+
+                new AlertDialog.Builder(SettingsActivity.this)
+                        .setTitle(title)
+                        .setMessage("Enter the folder path used when File-Based Desktop is enabled (e.g. /storage/emulated/0/Desktop).")
+                        .setView(wrap)
+                        .setPositiveButton("Save", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                String raw = input.getText().toString().trim();
+                                while (raw.length() > 1 && raw.endsWith("/")) {
+                                    raw = raw.substring(0, raw.length() - 1);
+                                }
+                                if (raw.isEmpty()) {
+                                    raw = defaultPath;
+                                }
+                                mPrefs.edit().putString(key, raw).commit();
+                                pathTv.setText(raw);
+                                ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
+                            }
+                        })
+                        .setNeutralButton("Reset Default", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                mPrefs.edit().remove(key).commit();
+                                pathTv.setText(defaultPath);
+                                ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
+                            }
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            }
+        };
+        changeBtn.setOnClickListener(openPicker);
+        row.setOnClickListener(openPicker);
+
+        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        btnLp.setMarginStart(dp(12));
+        row.addView(changeBtn, btnLp);
+        card.addView(row);
     }
 
     private void addDivider(LinearLayout card) {

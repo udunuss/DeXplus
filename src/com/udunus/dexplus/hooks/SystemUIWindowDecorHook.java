@@ -43,6 +43,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -139,6 +140,10 @@ public final class SystemUIWindowDecorHook {
     private static int imeType;
     private static Context systemUiContext;
 
+    private static final Map<Integer, Rect> LAST_FREEFORM_BOUNDS = new ConcurrentHashMap<Integer, Rect>();
+    private static final Set<Integer> CLIENT_FULLSCREEN_TASKS =
+            Collections.synchronizedSet(new HashSet<Integer>());
+
     private static boolean loggedDesktopInset;
     private static boolean loggedDesktopFlag;
     private static boolean loggedTypingInset;
@@ -154,6 +159,7 @@ public final class SystemUIWindowDecorHook {
     private static boolean loggedPinMiss;
     private static boolean loggedPinRaise;
     private static boolean loggedFullscreenGuard;
+    private static boolean loggedSystemFullscreenKept;
     private static boolean loggedMaximizeHide;
     private static boolean loggedFullscreenHide;
     private static boolean loggedMenu;
@@ -232,6 +238,7 @@ public final class SystemUIWindowDecorHook {
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
+                        recordFreeformBounds(param.thisObject, param.args);
                         if (param.args == null || param.args.length == 0 || param.args[0] == null) {
                             return;
                         }
@@ -240,6 +247,16 @@ public final class SystemUIWindowDecorHook {
                         try {
                             current = XposedHelpers.getIntField(params, "mCornerRadius");
                         } catch (Throwable error) {
+                            return;
+                        }
+                        boolean maximized = isTaskMaximizedDecor(param.thisObject, param.args);
+                        if (maximized) {
+                            if (current != 0) {
+                                try {
+                                    XposedHelpers.setIntField(params, "mCornerRadius", 0);
+                                } catch (Throwable ignored) {}
+                            }
+                            applyOutlineRadius(param.thisObject, 0);
                             return;
                         }
                         if (current < 0) {
@@ -265,8 +282,21 @@ public final class SystemUIWindowDecorHook {
                 }
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Object decor = field(param.thisObject, "mDecoration");
+                        if (param.args != null && param.args.length > 2
+                                && isTaskMaximizedDecor(decor, param.args)) {
+                            param.args[2] = Integer.valueOf(0);
+                        }
+                    }
+
+                    @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         Object decor = field(param.thisObject, "mDecoration");
+                        if (isTaskMaximizedDecor(decor, param.args)) {
+                            applyOutlineRadius(decor, 0);
+                            return;
+                        }
                         Object context = field(param.thisObject, "mContext");
                         int passed = -1;
                         if (param.args != null && param.args.length > 2 && param.args[2] instanceof Integer) {
@@ -412,9 +442,133 @@ public final class SystemUIWindowDecorHook {
             if (chrome == null || !surfaceValid(chrome.task)) {
                 continue;
             }
-            setSurfaceCorner(chrome.task, px);
-            applyOutlineRadius(chrome.host, px);
+            int target = isTaskMaximizedDecor(chrome.host) ? 0 : px;
+            setSurfaceCorner(chrome.task, target);
+            applyOutlineRadius(chrome.host, target);
         }
+    }
+
+    private static Object runningTaskFromArgs(Object[] args) {
+        if (args == null) {
+            return null;
+        }
+        for (int i = 0; i < args.length; i++) {
+            Object arg = args[i];
+            if (arg != null && "android.app.ActivityManager$RunningTaskInfo".equals(arg.getClass().getName())) {
+                return arg;
+            }
+        }
+        return null;
+    }
+
+    private static Rect taskBounds(Object task) {
+        if (task == null) {
+            return null;
+        }
+        try {
+            Object config = field(task, "configuration");
+            Object wc = field(config, "windowConfiguration");
+            Object bounds = wc == null ? null : XposedHelpers.callMethod(wc, "getBounds");
+            return bounds instanceof Rect ? (Rect) bounds : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTaskMaximizedDecor(Object decor, Object... args) {
+        if (!ModConfig.isModuleEnabled(systemUiContext)) {
+            return false;
+        }
+        Object argTask = runningTaskFromArgs(args);
+        Object task = argTask != null ? argTask : field(decor, "mTaskInfo");
+        if (task != null) {
+            try {
+                Object mode = XposedHelpers.callMethod(task, "getWindowingMode");
+                if (mode instanceof Integer && ((Integer) mode).intValue() == 1) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            if (decor != null) {
+                try {
+                    Object dc = field(decor, "mDisplayController");
+                    if (dc != null) {
+                        int displayId = XposedHelpers.getIntField(task, "displayId");
+                        Object layout = XposedHelpers.callMethod(dc, "getDisplayLayout", displayId);
+                        if (layout != null) {
+                            try {
+                                Class<?> utils = Class.forName(
+                                        "com.android.wm.shell.desktopmode.DesktopModeUtils",
+                                        false, decor.getClass().getClassLoader());
+                                if (Boolean.TRUE.equals(XposedHelpers.callStaticMethod(
+                                        utils, "isTaskMaximized", task, layout))) {
+                                    return true;
+                                }
+                            } catch (Throwable ignored) {}
+                            Rect bounds = taskBounds(task);
+                            if (bounds != null && !bounds.isEmpty()) {
+                                Rect stable = new Rect();
+                                try {
+                                    XposedHelpers.callMethod(layout, "getStableBoundsForDesktopMode", stable);
+                                    if (!stable.isEmpty() && bounds.width() >= stable.width()
+                                            && bounds.height() >= stable.height()) {
+                                        return true;
+                                    }
+                                } catch (Throwable ignored) {}
+                                try {
+                                    int dw = ((Integer) XposedHelpers.callMethod(layout, "width")).intValue();
+                                    int dh = ((Integer) XposedHelpers.callMethod(layout, "height")).intValue();
+                                    if (dw > 0 && dh > 0 && bounds.width() >= dw && bounds.height() >= dh) {
+                                        return true;
+                                    }
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        if (argTask == null && decor != null) {
+            try {
+                if (Boolean.TRUE.equals(field(decor, "mIsTaskMaximized"))) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (Boolean.TRUE.equals(XposedHelpers.callMethod(decor, "isTaskMaximized"))) {
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
+    private static void recordFreeformBounds(Object decor, Object[] args) {
+        Object task = runningTaskFromArgs(args);
+        if (task == null) {
+            task = field(decor, "mTaskInfo");
+        }
+        if (task == null) {
+            return;
+        }
+        try {
+            Object mode = XposedHelpers.callMethod(task, "getWindowingMode");
+            if (!(mode instanceof Integer) || ((Integer) mode).intValue() != 5) {
+                return;
+            }
+            int taskId = XposedHelpers.getIntField(task, "taskId");
+            if (CLIENT_FULLSCREEN_TASKS.contains(Integer.valueOf(taskId))) {
+                return;
+            }
+            Rect bounds = taskBounds(task);
+            if (bounds == null || bounds.isEmpty()) {
+                return;
+            }
+            Rect full = displayBounds(decor, task);
+            if (full != null && bounds.width() >= full.width() && bounds.height() >= full.height()) {
+                return;
+            }
+            LAST_FREEFORM_BOUNDS.put(Integer.valueOf(taskId), new Rect(bounds));
+        } catch (Throwable ignored) {}
     }
 
     private static void refreshKnownCaptions() {
@@ -471,9 +625,256 @@ public final class SystemUIWindowDecorHook {
                     hooked++;
                 }
             }
+            Class<?> tasksController = Class.forName(
+                    "com.android.wm.shell.desktopmode.DesktopTasksController",
+                    false, loader);
+            for (Method method : tasksController.getDeclaredMethods()) {
+                if ("handleRequest".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, KEEP_DESK_ON_SYSTEM_FULLSCREEN);
+                    hooked++;
+                }
+            }
+            hooked += hookTaskChangeFullscreenGuards(loader);
             XposedBridge.log(TAG + ": fullscreen desk guard " + hooked);
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not guard desktop fullscreen: " + error);
+        }
+    }
+
+    private static int hookTaskChangeFullscreenGuards(ClassLoader loader) {
+        int hooked = 0;
+        String[] observerLambdas = {
+                "com.android.wm.shell.freeform.FreeformTaskTransitionObserver$$ExternalSyntheticLambda8",
+        };
+        for (String name : observerLambdas) {
+            try {
+                Class<?> cls = Class.forName(name, false, loader);
+                for (Method method : cls.getDeclaredMethods()) {
+                    if ("accept".equals(method.getName())) {
+                        XposedBridge.hookMethod(method, MARK_CLIENT_FULLSCREEN_TASK);
+                        hooked++;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        try {
+            Class<?> listenerCls = Class.forName(
+                    "com.android.wm.shell.desktopmode.DesktopTaskChangeListener", false, loader);
+            for (Method method : listenerCls.getDeclaredMethods()) {
+                if ("onTaskChanging".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, MARK_CLIENT_FULLSCREEN_TASK);
+                    hooked++;
+                } else if ("onTaskClosing".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, CLEAR_CLIENT_FULLSCREEN_TASK);
+                    hooked++;
+                } else if ("removeTask".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, BLOCK_CLIENT_FULLSCREEN_TASK_REMOVE);
+                    hooked++;
+                }
+            }
+        } catch (Throwable ignored) {}
+        try {
+            Class<?> exitRunCls = Class.forName(
+                    "com.android.wm.shell.desktopmode.DesktopTaskChangeListener$onTaskChanging$1",
+                    false, loader);
+            for (Method method : exitRunCls.getDeclaredMethods()) {
+                if ("run".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, BLOCK_CLIENT_FULLSCREEN_DESK_EXIT);
+                    hooked++;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return hooked;
+    }
+
+    private static boolean isTrackedClientFullscreen(Object taskInfo) {
+        if (taskInfo == null || !ModConfig.isModuleEnabled(systemUiContext) || insideWindowFullscreen()) {
+            return false;
+        }
+        try {
+            int taskId = XposedHelpers.getIntField(taskInfo, "taskId");
+            if (!CLIENT_FULLSCREEN_TASKS.contains(Integer.valueOf(taskId))) {
+                return false;
+            }
+            Object modeObj = XposedHelpers.callMethod(taskInfo, "getWindowingMode");
+            return (modeObj instanceof Integer) && ((Integer) modeObj).intValue() == 1;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static final XC_MethodHook MARK_CLIENT_FULLSCREEN_TASK = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (!ModConfig.isModuleEnabled(systemUiContext) || insideWindowFullscreen()) {
+                return;
+            }
+            try {
+                Object taskInfo = null;
+                boolean isOnTaskChanging = true;
+                if (param.args != null && param.args.length > 0 && param.args[0] != null) {
+                    String argType = param.args[0].getClass().getName();
+                    if (argType.endsWith("RunningTaskInfo")) {
+                        taskInfo = param.args[0];
+                    } else if (argType.endsWith("DesktopTaskChangeListener")) {
+                        Object opId = field(param.thisObject, "$r8$classId");
+                        isOnTaskChanging = (opId instanceof Integer) && ((Integer) opId).intValue() == 2;
+                        Object change = field(param.thisObject, "f$0");
+                        if (change != null) {
+                            taskInfo = XposedHelpers.callMethod(change, "getTaskInfo");
+                        }
+                    }
+                }
+                if (isOnTaskChanging && isTrackedClientFullscreen(taskInfo)) {
+                    try {
+                        XposedHelpers.setBooleanField(taskInfo, "requestFullscreenMode", true);
+                    } catch (Throwable ignored) {}
+                    param.setResult(null);
+                }
+            } catch (Throwable error) {
+                XposedBridge.log(TAG + ": mark client fullscreen error: " + error);
+            }
+        }
+    };
+
+    private static final XC_MethodHook BLOCK_CLIENT_FULLSCREEN_TASK_REMOVE = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (!ModConfig.isModuleEnabled(systemUiContext) || insideWindowFullscreen()) {
+                return;
+            }
+            if (param.args == null || param.args.length < 3) {
+                return;
+            }
+            Object taskIdObj = param.args[1];
+            Object isClosingObj = param.args[2];
+            if ((taskIdObj instanceof Integer)
+                    && !Boolean.TRUE.equals(isClosingObj)
+                    && CLIENT_FULLSCREEN_TASKS.contains((Integer) taskIdObj)) {
+                param.setResult(null);
+            }
+        }
+    };
+
+    private static final XC_MethodHook CLEAR_CLIENT_FULLSCREEN_TASK = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (param.args == null || param.args.length == 0 || param.args[0] == null) {
+                return;
+            }
+            try {
+                int taskId = XposedHelpers.getIntField(param.args[0], "taskId");
+                CLIENT_FULLSCREEN_TASKS.remove(Integer.valueOf(taskId));
+            } catch (Throwable ignored) {}
+        }
+    };
+
+    private static final XC_MethodHook BLOCK_CLIENT_FULLSCREEN_DESK_EXIT = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                Object taskInfo = field(param.thisObject, "$taskInfo");
+                if (isTrackedClientFullscreen(taskInfo)) {
+                    param.setResult(null);
+                }
+            } catch (Throwable ignored) {}
+        }
+    };
+
+    private static final XC_MethodHook KEEP_DESK_ON_SYSTEM_FULLSCREEN = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (!ModConfig.isModuleEnabled(systemUiContext) || insideWindowFullscreen()) {
+                return;
+            }
+            if (param.args == null || param.args.length < 2 || param.args[1] == null) {
+                return;
+            }
+            Object request = param.args[1];
+            try {
+                Object typeObj = XposedHelpers.callMethod(request, "getType");
+                if (!(typeObj instanceof Integer) || ((Integer) typeObj).intValue() != 6) {
+                    return;
+                }
+                Object task = XposedHelpers.callMethod(request, "getTriggerTask");
+                if (task == null) {
+                    return;
+                }
+                int taskId = XposedHelpers.getIntField(task, "taskId");
+                Object modeObj = XposedHelpers.callMethod(task, "getWindowingMode");
+                if (!(modeObj instanceof Integer)) {
+                    return;
+                }
+                int mode = ((Integer) modeObj).intValue();
+                Object handler = field(param.thisObject, "clientFullscreenRequestTransitionHandler");
+                if (mode == 1 && handler != null) {
+                    if (!Boolean.TRUE.equals(XposedHelpers.callMethod(handler, "shouldHandleRequest", request))) {
+                        return;
+                    }
+                    CLIENT_FULLSCREEN_TASKS.add(Integer.valueOf(taskId));
+                    Class<?> wctClass = Class.forName("android.window.WindowContainerTransaction",
+                            false, param.thisObject.getClass().getClassLoader());
+                    Object wct = wctClass.getDeclaredConstructor().newInstance();
+                    Object token = field(task, "token");
+                    Rect full = displayBoundsFromController(param.thisObject, task);
+                    if (token != null) {
+                        if (full != null) {
+                            XposedHelpers.callMethod(wct, "setBounds", token, full);
+                        }
+                        try {
+                            XposedHelpers.callMethod(wct, "setForceImmersiveChange", token);
+                        } catch (Throwable ignored) {}
+                        XposedHelpers.callMethod(wct, "reorder", token, Boolean.TRUE);
+                    }
+                    param.setResult(wct);
+                    if (!loggedSystemFullscreenKept) {
+                        loggedSystemFullscreenKept = true;
+                        XposedBridge.log(TAG + ": kept system video fullscreen inside DeX");
+                    }
+                    return;
+                }
+                if (mode == 5 && CLIENT_FULLSCREEN_TASKS.remove(Integer.valueOf(taskId))) {
+                    Rect saved = LAST_FREEFORM_BOUNDS.get(Integer.valueOf(taskId));
+                    if (saved != null && !saved.isEmpty()) {
+                        Rect current = taskBounds(task);
+                        Rect full = displayBoundsFromController(param.thisObject, task);
+                        if (current == null || current.isEmpty() || (full != null && current.equals(full))) {
+                            Class<?> wctClass = Class.forName("android.window.WindowContainerTransaction",
+                                    false, param.thisObject.getClass().getClassLoader());
+                            Object wct = wctClass.getDeclaredConstructor().newInstance();
+                            Object token = field(task, "token");
+                            if (token != null) {
+                                XposedHelpers.callMethod(wct, "setBounds", token, new Rect(saved));
+                                param.setResult(wct);
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable error) {
+                XposedBridge.log(TAG + ": system fullscreen guard failed: " + error);
+            }
+        }
+    };
+
+    private static Rect displayBoundsFromController(Object controller, Object task) {
+        if (controller == null || task == null) {
+            return null;
+        }
+        try {
+            Object dc = field(controller, "displayController");
+            if (dc == null) {
+                return displayBoundsFromContext(controller);
+            }
+            int displayId = XposedHelpers.getIntField(task, "displayId");
+            Object layout = XposedHelpers.callMethod(dc, "getDisplayLayout", displayId);
+            if (layout == null) {
+                return displayBoundsFromContext(controller);
+            }
+            int w = ((Integer) XposedHelpers.callMethod(layout, "width")).intValue();
+            int h = ((Integer) XposedHelpers.callMethod(layout, "height")).intValue();
+            return w > 0 && h > 0 ? new Rect(0, 0, w, h) : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

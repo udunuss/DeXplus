@@ -52,22 +52,14 @@ public final class ModConfig {
     public static final String KEY_STATUS_PANEL_MODE = "status_panel_mode"; // 0 = DeX Panels + Fallback, 1 = System Shade
     public static final String KEY_SHOW_DEX_FINDER_BTN = "show_dex_finder_btn";
 
-    // Native Home Screen & Layout (Launcher)
-    public static final String KEY_HIDE_PAGE_ARROWS = "hide_page_arrows";
-    public static final String KEY_BLOCK_HOME_GESTURES = "block_home_gestures";
-    public static final String KEY_SIDE_MARGIN_PCT = "side_margin_pct";
-    public static final String KEY_TOP_MARGIN_PCT = "top_margin_pct";
-    public static final String KEY_BOTTOM_MARGIN_PCT = "bottom_margin_pct";
-    public static final String KEY_HOME_ICON_SCALE = "home_icon_scale";
-
-    // Optional Custom Desktop Overlay (Launcher)
-    public static final String KEY_CUSTOM_DESKTOP_ENABLED = "custom_desktop_enabled";
-    public static final String KEY_DESKTOP_GRID_COLS = "desktop_grid_cols";
-    public static final String KEY_DESKTOP_GRID_ROWS = "desktop_grid_rows";
+    // Desktop (Launcher)
     public static final String KEY_DESKTOP_ICON_SCALE = "desktop_icon_scale";
     public static final String KEY_DESKTOP_DOUBLE_CLICK = "desktop_double_click";
     public static final String KEY_DESKTOP_FREEFORM_LAUNCH = "desktop_freeform_launch";
     public static final String KEY_DESKTOP_FREE_PLACEMENT = "desktop_free_placement";
+    public static final String KEY_DESKTOP_FILE_BASED = "desktop_file_based";
+    public static final String KEY_DESKTOP_FOLDER_PATH = "desktop_folder_path";
+    public static final String DEFAULT_DESKTOP_FOLDER_PATH = "/storage/emulated/0/Desktop";
 
     // Window Decorations & Status Bar (SystemUI)
     public static final String KEY_HIDE_STATUS_BAR = "hide_status_bar";
@@ -109,20 +101,12 @@ public final class ModConfig {
         defaults.put(KEY_STATUS_PANEL_MODE, 0);
         defaults.put(KEY_SHOW_DEX_FINDER_BTN, true);
 
-        defaults.put(KEY_HIDE_PAGE_ARROWS, true);
-        defaults.put(KEY_BLOCK_HOME_GESTURES, true);
-        defaults.put(KEY_SIDE_MARGIN_PCT, 40);
-        defaults.put(KEY_TOP_MARGIN_PCT, 0);
-        defaults.put(KEY_BOTTOM_MARGIN_PCT, 100);
-        defaults.put(KEY_HOME_ICON_SCALE, 100);
-
-        defaults.put(KEY_CUSTOM_DESKTOP_ENABLED, false);
-        defaults.put(KEY_DESKTOP_GRID_COLS, 10);
-        defaults.put(KEY_DESKTOP_GRID_ROWS, 5);
         defaults.put(KEY_DESKTOP_ICON_SCALE, 100);
-        defaults.put(KEY_DESKTOP_DOUBLE_CLICK, false);
+        defaults.put(KEY_DESKTOP_DOUBLE_CLICK, true);
         defaults.put(KEY_DESKTOP_FREEFORM_LAUNCH, true);
-        defaults.put(KEY_DESKTOP_FREE_PLACEMENT, false);
+        defaults.put(KEY_DESKTOP_FREE_PLACEMENT, true);
+        defaults.put(KEY_DESKTOP_FILE_BASED, false);
+        defaults.put(KEY_DESKTOP_FOLDER_PATH, DEFAULT_DESKTOP_FOLDER_PATH);
 
         defaults.put(KEY_HIDE_STATUS_BAR, true);
         defaults.put(KEY_TOP_EDGE_MAXIMIZE, true);
@@ -442,6 +426,16 @@ public final class ModConfig {
         if (val instanceof Number) return ((Number) val).intValue();
         if (val instanceof String) {
             try { return Integer.parseInt((String) val); } catch (Throwable ignored) {}
+        }
+        return defVal;
+    }
+
+    public static String getString(Context context, String key, String defVal) {
+        if (context != null) ensureInitialized(context);
+        Object val = CACHE.get(key);
+        if (val != null) {
+            String s = String.valueOf(val);
+            if (!s.isEmpty()) return s;
         }
         return defVal;
     }

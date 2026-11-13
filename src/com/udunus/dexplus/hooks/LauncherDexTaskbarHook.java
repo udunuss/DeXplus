@@ -1,16 +1,17 @@
 package com.udunus.dexplus.hooks;
 
 import android.app.Application;
+import android.app.Notification;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.drawable.GradientDrawable;
-import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.service.notification.StatusBarNotification;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
@@ -20,10 +21,8 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
-import com.udunus.dexplus.util.HomeGrid;
 import com.udunus.dexplus.util.ModConfig;
 
-import java.io.File;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -164,21 +163,11 @@ public final class LauncherDexTaskbarHook {
     private static volatile boolean taskbarEnabled = true;
     private static volatile boolean fixExternalDpi;
     private static volatile boolean hideStatusBar = true;
-    private static volatile boolean hideArrows = true;
-    private static volatile boolean blockHomeGestures = true;
     private static volatile boolean showFinderBtn = true;
     private static volatile int statusPanelMode = 0;
-    private static volatile int marginPercent = 40;
-    private static volatile int verticalPercent = 0;
-    private static volatile int bottomPercent = 100;
-    private static volatile int homeIconScale = 100;
     private static volatile Object homeUiComponent;
-    private static volatile int targetColumns = 12;
-    private static volatile int targetRows = 12;
     private static volatile int cachedTaskBarHeightResId = -1;
     private static volatile WeakReference<View> finderButtonRef;
-    private static FileObserver iconSizeObserver;
-    private static boolean iconSizeWatching;
     private static String appliedOptions;
     private static long startedAt;
     private static int applied = UNSET;
@@ -188,21 +177,17 @@ public final class LauncherDexTaskbarHook {
     private static boolean loggedHeight;
     private static boolean loggedWindowType;
     private static boolean loggedDensity;
-    private static boolean loggedMargin;
-    private static boolean loggedVertical;
-    private static boolean loggedBottom;
     private static boolean loggedSuper;
     private static boolean loggedStatus;
     private static boolean loggedBadge;
     private static boolean loggedQsGuard;
     private static boolean loggedBattery;
-    private static boolean loggedDrawer;
     private static boolean loggedShade;
     private static boolean settingsLoaded;
     private static boolean taskbarVisFailed;
     private static volatile int notificationCount;
+    private static volatile boolean repoCountActive;
     private static volatile Object dexListener;
-    private static final Map<Integer, Integer> MARGIN_NAMES = new HashMap<Integer, Integer>();
     private static final WeakHashMap<View, Integer> BATTERY_SIZE = new WeakHashMap<View, Integer>();
     private static boolean loggedNotifAccess;
     private static boolean loggedNotifRefresh;
@@ -301,7 +286,7 @@ public final class LauncherDexTaskbarHook {
         XposedBridge.log(TAG + ": wrapped " + wrapped + " taskbar methods");
         keepTaskbarOnDeviceDisplay(loader);
         hookDexDensity(loader);
-        hookDesktopOptions(loader);
+        hookSuperKey(loader);
         hookStatusIcons(loader);
         hookBatteryDrawable(loader);
         hookHomeGestures(loader);
@@ -634,13 +619,7 @@ public final class LauncherDexTaskbarHook {
             XposedBridge.log(TAG + ": in-device DeX is " + (on ? "on" : "off"));
             persist(on);
             applyStatusBar();
-            boolean gridChanged = false;
-            if (on && settingsLoaded && appContext != null) {
-                gridChanged = applyGrid(appContext);
-            }
-            if (gridChanged) {
-                restartForScale();
-            } else if (previous != UNSET && taskbarSeen) {
+            if (previous != UNSET && taskbarSeen) {
                 restartLauncher();
             }
         }
@@ -729,7 +708,10 @@ public final class LauncherDexTaskbarHook {
         int limit = stack.length < 36 ? stack.length : 36;
         for (int i = 0; i < limit; i++) {
             String name = stack[i].getClassName();
-            if (name.indexOf("taskbar") >= 0 || name.indexOf("dexpanel") >= 0 || name.startsWith("p4.")) {
+            if (name.indexOf("taskbar") >= 0 || name.indexOf("dexpanel") >= 0
+                    || name.startsWith("p4.")
+                    || name.startsWith("R6.") || name.startsWith("T6.")
+                    || name.startsWith("J6.") || name.startsWith("O6.")) {
                 return true;
             }
         }
@@ -746,23 +728,11 @@ public final class LauncherDexTaskbarHook {
         boolean extDpi = ModConfig.getBoolean(context, ModConfig.KEY_FIX_EXTERNAL_DEX_DPI, false);
         boolean forceDex = ModConfig.getBoolean(context, ModConfig.KEY_FORCE_INTERNAL_DEX, false);
         boolean status = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_STATUS_BAR, true);
-        boolean arrows = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_PAGE_ARROWS, true);
-        boolean gestures = ModConfig.getBoolean(context, ModConfig.KEY_BLOCK_HOME_GESTURES, true);
         boolean finder = ModConfig.getBoolean(context, ModConfig.KEY_SHOW_DEX_FINDER_BTN, true);
         int panelMode = ModConfig.getInt(context, ModConfig.KEY_STATUS_PANEL_MODE, 0);
-        int margin = clamp(ModConfig.getInt(context, ModConfig.KEY_SIDE_MARGIN_PCT, 40), 0, 100);
-        int iconScale = clamp(ModConfig.getInt(context, ModConfig.KEY_HOME_ICON_SCALE, 100), 60, 160);
-        homeIconScale = iconScale;
-        int[] fit = gridForIconSize(context);
-        int columns = fit[0];
-        int rows = fit[1];
-        int vertical = clamp(ModConfig.getInt(context, ModConfig.KEY_TOP_MARGIN_PCT, 0), 0, 100);
-        int bottom = clamp(ModConfig.getInt(context, ModConfig.KEY_BOTTOM_MARGIN_PCT, 100), 0, 100);
 
         String signature = scale + "/" + heightScale + "/" + (enabled ? 1 : 0)
-                + "/" + (taskbar ? 1 : 0) + "/" + (extDpi ? 1 : 0) + "/" + (forceDex ? 1 : 0)
-                + "/" + margin + "/" + columns + "/" + rows + "/" + vertical + "/" + bottom
-                + "/" + iconScale;
+                + "/" + (taskbar ? 1 : 0) + "/" + (extDpi ? 1 : 0) + "/" + (forceDex ? 1 : 0);
         boolean changed;
         synchronized (LauncherDexTaskbarHook.class) {
             scalePercent = scale;
@@ -772,34 +742,16 @@ public final class LauncherDexTaskbarHook {
             fixExternalDpi = extDpi;
             forceInternalDex = forceDex;
             hideStatusBar = status;
-            hideArrows = arrows;
-            blockHomeGestures = gestures;
             showFinderBtn = finder;
             statusPanelMode = panelMode;
-            marginPercent = margin;
-            verticalPercent = vertical;
-            bottomPercent = bottom;
-            homeIconScale = iconScale;
             settingsLoaded = true;
-            targetColumns = columns;
-            targetRows = rows;
             changed = appliedOptions != null && !appliedOptions.equals(signature);
-            if (changed) {
-                try {
-                    context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-                            .edit()
-                            .putInt("gridTries", 0)
-                            .commit();
-                } catch (Throwable ignored) {}
-            }
             appliedOptions = signature;
         }
         XposedBridge.log(TAG + ": settings " + signature);
-        watchIconSize(context);
         applyStatusBar();
         updateFinderButtonVisibility();
-        boolean gridChanged = applyGrid(context);
-        if (changed || gridChanged) {
+        if (changed) {
             restartForScale();
         }
     }
@@ -952,203 +904,18 @@ public final class LauncherDexTaskbarHook {
         }
     }
 
-    private static boolean applyGrid(Context context) {
-        if (context == null || context.getFilesDir() == null) {
-            return false;
-        }
-        if (modsEnabled && !dexOn()) {
-            return false;
-        }
-        File dir = new File(context.getFilesDir(), "datastore");
-        boolean changed = false;
-        changed |= applyGridFile(
-                context,
-                new File(dir, "com.sec.android.app.launcher.prefs.preferences_pb"),
-                "gridBaseX",
-                "gridBaseY",
-                "gridTries");
-        changed |= applyGridFile(
-                context,
-                new File(dir, "com.sec.android.app.launcher.dex.prefs.preferences_pb"),
-                "gridDexBaseX",
-                "gridDexBaseY",
-                "gridDexTries");
-        return changed;
-    }
-
-    /**
-     * Columns and rows are the most that still fit the One UI Home icon size.
-     * Samsung stores that size as a fraction of the short screen side: about 0.072
-     * at Medium, 0.005 less for Small and 0.005 more for Large. A cell has to keep
-     * that icon, its label and a small gap inside 90% of the cell, which is the
-     * launcher's own fit check. Tablet grids stay inside 6–16 and phone grids
-     * inside 4–7. Values are stored in portrait axes because landscape shows them swapped.
-     */
-    private static int[] gridForIconSize(Context context) {
-        DisplayMetrics metrics;
-        try {
-            metrics = context.getResources().getDisplayMetrics();
-        } catch (Throwable error) {
-            return new int[] {targetColumns, targetRows};
-        }
-        int width = Math.max(1, metrics.widthPixels);
-        int height = Math.max(1, metrics.heightPixels);
-        int shortSide = Math.min(width, height);
-        int level = iconSizeLevel(context);
-        float fraction = 0.072f + (level - 1) * 0.005f;
-        int icon = Math.max(Math.round(32f * metrics.density), Math.round(fraction * shortSide));
-        icon = Math.max(1, Math.round(icon * (homeIconScale / 100f)));
-        int label = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 13f, metrics));
-        int gap = Math.round(6f * metrics.density);
-        int minWidth = Math.max(1, Math.round(icon / 0.9f));
-        int minHeight = Math.max(1, Math.round((icon + label + gap) / 0.9f));
-        // Workspace content is inset from the full display by the taskbar and page padding.
-        int availW = Math.max(1, width - Math.round(70f * metrics.density));
-        int availH = Math.max(1, height - Math.round(120f * metrics.density));
-        boolean tablet = shortSide / metrics.density >= 600f;
-        int min = tablet ? 6 : 4;
-        int max = tablet ? 16 : 7;
-        int screenCols = clamp(availW / minWidth, min, max);
-        int screenRows = clamp(availH / minHeight, min, max);
-        // CellX/CellY are the portrait axes. In landscape the workspace shows (CellY, CellX).
-        boolean landscape = width > height;
-        int cellX = landscape ? screenRows : screenCols;
-        int cellY = landscape ? screenCols : screenRows;
-        return new int[] {cellX, cellY};
-    }
-
-    private static int iconSizeLevel(Context context) {
-        try {
-            File file = new File(
-                    context.getFilesDir(),
-                    "datastore/com.sec.android.app.launcher.common.prefs.preferences_pb");
-            int level = HomeGrid.readInt(file, "pref_item_size_level_key");
-            if (level < 0) {
-                return 1;
-            }
-            if (level > 2) {
-                return 2;
-            }
-            return level;
-        } catch (Throwable error) {
-            return 1;
-        }
-    }
-
-    private static void watchIconSize(final Context context) {
-        if (iconSizeWatching || context == null || context.getFilesDir() == null) {
-            return;
-        }
-        final File file = new File(
-                context.getFilesDir(),
-                "datastore/com.sec.android.app.launcher.common.prefs.preferences_pb");
-        if (!file.isFile()) {
-            return;
-        }
-        iconSizeWatching = true;
-        final Handler handler = new Handler(Looper.getMainLooper());
-        iconSizeObserver = new FileObserver(file.getAbsolutePath(), FileObserver.CLOSE_WRITE | FileObserver.MODIFY) {
-            @Override
-            public void onEvent(int event, String path) {
-                handler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        Context current = appContext;
-                        if (current != null) {
-                            readSettings(current);
-                        }
-                    }
-                });
-            }
-        };
-        iconSizeObserver.startWatching();
-    }
-
-    private static boolean applyGridFile(
-            Context context,
-            File file,
-            String baseKeyX,
-            String baseKeyY,
-            String triesKey) {
-        if (file == null || !file.isFile()) {
-            return false;
-        }
-        try {
-            SharedPreferences prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE);
-            int currentX = HomeGrid.readInt(file, "Workspace.CellX");
-            int currentY = HomeGrid.readInt(file, "Workspace.CellY");
-            if (currentX < 0 || currentY < 0) {
-                return false;
-            }
-            int baseX = prefs.getInt(baseKeyX, -1);
-            int baseY = prefs.getInt(baseKeyY, -1);
-            if (!modsEnabled) {
-                if (baseX < 0 || baseY < 0) {
-                    return false;
-                }
-                if (currentX == baseX && currentY == baseY) {
-                    prefs.edit().remove(baseKeyX).remove(baseKeyY).putInt(triesKey, 0).commit();
-                    return false;
-                }
-                if (prefs.getInt(triesKey, 0) >= 2) {
-                    return false;
-                }
-                prefs.edit().putInt(triesKey, prefs.getInt(triesKey, 0) + 1).commit();
-                HomeGrid.writeInt(file, "Workspace.CellX", baseX);
-                HomeGrid.writeInt(file, "Workspace.CellY", baseY);
-                XposedBridge.log(TAG + ": home grid restored to " + baseX + "x" + baseY);
-                return true;
-            }
-            if (baseX < 0 || baseY < 0) {
-                SharedPreferences grokPrefs = context.getSharedPreferences("externaldex", Context.MODE_PRIVATE);
-                int gx = grokPrefs.getInt(baseKeyX, -1);
-                int gy = grokPrefs.getInt(baseKeyY, -1);
-                if ("gridBaseX".equals(baseKeyX)) {
-                    gx = grokPrefs.getInt("gridBaseX", gx);
-                    gy = grokPrefs.getInt("gridBaseY", gy);
-                }
-                baseX = gx > 0 ? gx : currentX;
-                baseY = gy > 0 ? gy : currentY;
-                prefs.edit().putInt(baseKeyX, baseX).putInt(baseKeyY, baseY).commit();
-            }
-            int wantX = targetColumns;
-            int wantY = targetRows;
-            if (currentX == wantX && currentY == wantY) {
-                if (prefs.getInt(triesKey, 0) != 0) {
-                    prefs.edit().putInt(triesKey, 0).commit();
-                }
-                return false;
-            }
-            if (prefs.getInt(triesKey, 0) >= 2) {
-                return false;
-            }
-            prefs.edit().putInt(triesKey, prefs.getInt(triesKey, 0) + 1).commit();
-            HomeGrid.writeInt(file, "Workspace.CellX", wantX);
-            HomeGrid.writeInt(file, "Workspace.CellY", wantY);
-            XposedBridge.log(TAG + ": home grid " + file.getName() + " "
-                    + currentX + "x" + currentY + " -> " + wantX + "x" + wantY);
-            return true;
-        } catch (Throwable error) {
-            XposedBridge.log(TAG + ": home grid change failed: " + error);
-            return false;
-        }
-    }
-
     private static void hookHomeGestures(ClassLoader loader) {
-        // Swipe gestures (App Drawer & Notification Shade)
-        hookGesture(loader, "Z3.a", false);
-        hookGesture(loader, "G5.n", false);
-        hookGesture(loader, "G5.c", false);
-        hookGesture(loader, "G5.e", false);
-        // Workspace long-press edit mode, pinch edit mode, and minus-one page controllers
-        // (blocked when Dedicated Workspace is active so long-press/pinch/swipe don't trigger Home Edit mode)
-        hookGesture(loader, "G5.h", true);
-        hookGesture(loader, "G5.l", true);
-        hookGesture(loader, "G5.k", true);
+        // Block Home Screen swipe, edit-mode, pinch, and minus-one page controllers while Desktop is active
+        hookGesture(loader, "Z3.a");
+        hookGesture(loader, "G5.n");
+        hookGesture(loader, "G5.c");
+        hookGesture(loader, "G5.e");
+        hookGesture(loader, "G5.h");
+        hookGesture(loader, "G5.l");
+        hookGesture(loader, "G5.k");
     }
 
-    private static void hookGesture(ClassLoader loader, String className, boolean dedicatedWorkspaceOnly) {
-        XC_MethodHook hook = dedicatedWorkspaceOnly ? BLOCK_DEDICATED_WORKSPACE_TOUCH : BLOCK_HOME_SWIPE_GESTURE;
+    private static void hookGesture(ClassLoader loader, String className) {
         try {
             Class<?> type = Class.forName(className, false, loader);
             Class<?> event = Class.forName("android.view.MotionEvent");
@@ -1160,7 +927,7 @@ public final class LauncherDexTaskbarHook {
                         && ("onControllerInterceptTouchEvent".equals(name)
                         || "onControllerTouchEvent".equals(name)
                         || "onControllerDispatchTouchEvent".equals(name))) {
-                    XposedBridge.hookMethod(method, hook);
+                    XposedBridge.hookMethod(method, BLOCK_DESKTOP_HOME_TOUCH);
                 }
             }
         } catch (Throwable error) {
@@ -1168,41 +935,10 @@ public final class LauncherDexTaskbarHook {
         }
     }
 
-    private static boolean isDedicatedWorkspaceActive() {
-        Context ctx = appContext;
-        return modsEnabled && dexOn() && ctx != null
-                && ModConfig.getBoolean(ctx, ModConfig.KEY_CUSTOM_DESKTOP_ENABLED, false);
-    }
-
-    private static boolean shouldBlockHomeGestures() {
-        if (!modsEnabled || !dexOn()) {
-            return false;
-        }
-        return blockHomeGestures || isDedicatedWorkspaceActive();
-    }
-
-    private static final XC_MethodHook BLOCK_HOME_SWIPE_GESTURE = new XC_MethodHook() {
+    private static final XC_MethodHook BLOCK_DESKTOP_HOME_TOUCH = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (!shouldBlockHomeGestures()) {
-                return;
-            }
-            if (((Method) param.method).getReturnType() == boolean.class) {
-                param.setResult(Boolean.FALSE);
-            } else {
-                param.setResult(null);
-            }
-            if (!loggedDrawer) {
-                loggedDrawer = true;
-                XposedBridge.log(TAG + ": home swipe gesture ignored");
-            }
-        }
-    };
-
-    private static final XC_MethodHook BLOCK_DEDICATED_WORKSPACE_TOUCH = new XC_MethodHook() {
-        @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn() || !isDedicatedWorkspaceActive()) {
+            if (!modsEnabled || !dexOn()) {
                 return;
             }
             if (((Method) param.method).getReturnType() == boolean.class) {
@@ -1212,193 +948,8 @@ public final class LauncherDexTaskbarHook {
             }
             if (!loggedShade) {
                 loggedShade = true;
-                XposedBridge.log(TAG + ": workspace edit gesture ignored for dedicated workspace");
+                XposedBridge.log(TAG + ": home gestures blocked for Desktop");
             }
-        }
-    };
-
-    private static void hookDesktopOptions(ClassLoader loader) {
-        String[] pages = {
-                "com.honeyspace.ui.common.FastRecyclerView",
-                "com.honeyspace.ui.honeypots.workspace.presentation.WorkspaceFastRecyclerView",
-                "com.honeyspace.ui.honeypots.applist.presentation.ApplistFastRecyclerView"
-        };
-        for (int i = 0; i < pages.length; i++) {
-            hookArrowMethods(loader, pages[i]);
-        }
-        try {
-            Class<?> ext = Class.forName(
-                    "com.honeyspace.common.context.ContextExtensionKt", false, loader);
-            int hooked = 0;
-            for (Method method : ext.getDeclaredMethods()) {
-                String name = method.getName();
-                if (("getFraction".equals(name) || "getFractionValue".equals(name))
-                        && method.getParameterTypes().length == 3) {
-                    XposedBridge.hookMethod(method, FRACTION_MARGIN);
-                    hooked++;
-                }
-            }
-            XposedBridge.log(TAG + ": page margin hooks " + hooked);
-        } catch (Throwable error) {
-            XposedBridge.log(TAG + ": could not hook page margins: " + error);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.honeyspace.ui.common.CellLayoutInfoImpl",
-                    loader,
-                    "getBottomPadding",
-                    Context.class,
-                    android.graphics.Point.class,
-                    BOTTOM_PADDING);
-        } catch (Throwable error) {
-            XposedBridge.log(TAG + ": could not hook bottom padding: " + error);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.honeyspace.ui.common.iconview.style.AbsItemStyleFactory",
-                    loader,
-                    "getItemStyle",
-                    android.util.Size.class,
-                    "com.honeyspace.sdk.source.entity.StyleOption",
-                    android.graphics.Point.class,
-                    boolean.class,
-                    HOME_ICON_SIZE);
-        } catch (Throwable error) {
-            XposedBridge.log(TAG + ": could not hook home icon size: " + error);
-        }
-        hookSuperKey(loader);
-    }
-
-    private static void hookArrowMethods(ClassLoader loader, String className) {
-        try {
-            Class<?> type = Class.forName(className, false, loader);
-            for (Method method : type.getDeclaredMethods()) {
-                if ("needToHidePageNavigation".equals(method.getName())) {
-                    XposedBridge.hookMethod(method, HIDE_PAGE_ARROWS);
-                } else if ("showPageNavigation".equals(method.getName())) {
-                    XposedBridge.hookMethod(method, SKIP_PAGE_ARROWS);
-                }
-            }
-        } catch (Throwable error) {
-            XposedBridge.log(TAG + ": could not hook page arrows on " + className + ": " + error);
-        }
-    }
-
-    private static boolean arrowsActive() {
-        return modsEnabled && hideArrows && dexOn();
-    }
-
-    private static final XC_MethodHook HIDE_PAGE_ARROWS = new XC_MethodHook() {
-        @Override
-        protected void afterHookedMethod(MethodHookParam param) {
-            if (arrowsActive()) {
-                param.setResult(Boolean.TRUE);
-            }
-        }
-    };
-
-    private static final XC_MethodHook SKIP_PAGE_ARROWS = new XC_MethodHook() {
-        @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (arrowsActive()) {
-                param.setResult(null);
-            }
-        }
-    };
-
-    private static final XC_MethodHook FRACTION_MARGIN = new XC_MethodHook() {
-        @Override
-        protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn()) {
-                return;
-            }
-            if (!(param.args[0] instanceof Context) || !(param.args[1] instanceof Integer)) {
-                return;
-            }
-            int kind = paddingKind((Context) param.args[0], ((Integer) param.args[1]).intValue());
-            // Bottom padding is applied as one total in getBottomPadding.
-            if (kind == 0 || kind == 3) {
-                return;
-            }
-            int percent = kind == 1 ? marginPercent : verticalPercent;
-            if (percent >= 100) {
-                return;
-            }
-            float scale = percent / 100f;
-            Object result = param.getResult();
-            if (result instanceof Integer) {
-                int px = ((Integer) result).intValue();
-                if (px <= 0) {
-                    return;
-                }
-                int next = Math.round(px * scale);
-                param.setResult(Integer.valueOf(next));
-                logMargin(kind, px + "px -> " + next + "px at " + percent + "%");
-            } else if (result instanceof Float) {
-                float value = ((Float) result).floatValue();
-                if (value <= 0f) {
-                    return;
-                }
-                param.setResult(Float.valueOf(value * scale));
-                logMargin(kind, value + " -> " + (value * scale) + " at " + percent + "%");
-            }
-        }
-    };
-
-    private static final XC_MethodHook BOTTOM_PADDING = new XC_MethodHook() {
-        @Override
-        protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn() || !(param.getResult() instanceof Integer)) {
-                return;
-            }
-            int px = ((Integer) param.getResult()).intValue();
-            if (px <= 0) {
-                return;
-            }
-            float density = 1.75f;
-            if (param.args != null && param.args.length > 0 && param.args[0] instanceof Context) {
-                try {
-                    density = ((Context) param.args[0]).getResources().getDisplayMetrics().density;
-                } catch (Throwable ignored) {}
-            }
-            int taskbar = Math.max(1, Math.round(56f * density * heightScalePercent / 100f));
-            int next;
-            if (px <= taskbar) {
-                next = Math.round(px * bottomPercent / 100f);
-            } else {
-                next = taskbar + Math.round((px - taskbar) * (bottomPercent / 100f));
-            }
-            if (next == px) {
-                return;
-            }
-            param.setResult(Integer.valueOf(next));
-            logMargin(3, px + "px -> " + next + "px at " + bottomPercent + "%");
-        }
-    };
-
-    private static final XC_MethodHook HOME_ICON_SIZE = new XC_MethodHook() {
-        @Override
-        protected void afterHookedMethod(MethodHookParam param) {
-            int scale = homeIconScale;
-            if (scale == 100 || !modsEnabled || !dexOn() || param.getResult() == null) {
-                return;
-            }
-            if (param.args != null && param.args.length > 0 && param.args[0] instanceof android.util.Size) {
-                android.util.Size area = (android.util.Size) param.args[0];
-                if (area.getWidth() < 100 && area.getHeight() < 100) {
-                    return;
-                }
-            }
-            try {
-                int size = XposedHelpers.getIntField(param.getResult(), "itemSize");
-                if (size <= 0) {
-                    return;
-                }
-                int next = Math.max(1, Math.round(size * (scale / 100f)));
-                if (next != size) {
-                    XposedHelpers.setIntField(param.getResult(), "itemSize", next);
-                }
-            } catch (Throwable ignored) {}
         }
     };
 
@@ -1501,52 +1052,6 @@ public final class LauncherDexTaskbarHook {
         }
     }
 
-    private static void logMargin(int kind, String message) {
-        if (kind == 1 && !loggedMargin) {
-            loggedMargin = true;
-            XposedBridge.log(TAG + ": side margin " + message);
-        } else if (kind == 2 && !loggedVertical) {
-            loggedVertical = true;
-            XposedBridge.log(TAG + ": top margin " + message);
-        } else if (kind == 3 && !loggedBottom) {
-            loggedBottom = true;
-            XposedBridge.log(TAG + ": bottom margin " + message);
-        }
-    }
-
-    private static int paddingKind(Context context, int id) {
-        synchronized (MARGIN_NAMES) {
-            Integer cached = MARGIN_NAMES.get(Integer.valueOf(id));
-            if (cached != null) {
-                return cached.intValue();
-            }
-        }
-        int kind = 0;
-        try {
-            Object resources = context.getClass().getMethod("getResources").invoke(context);
-            String name = (String) resources.getClass()
-                    .getMethod("getResourceEntryName", int.class)
-                    .invoke(resources, Integer.valueOf(id));
-            if (name != null && name.indexOf("apps_") < 0) {
-                if (name.indexOf("page_side_padding") >= 0
-                        || name.indexOf("page_left_padding") >= 0
-                        || name.indexOf("page_right_padding") >= 0) {
-                    kind = 1;
-                } else if (name.indexOf("page_bottom_padding") >= 0) {
-                    kind = 3;
-                } else if (name.indexOf("page_top_padding") >= 0) {
-                    kind = 2;
-                }
-            }
-        } catch (Throwable ignored) {}
-        synchronized (MARGIN_NAMES) {
-            if (MARGIN_NAMES.size() < 128) {
-                MARGIN_NAMES.put(Integer.valueOf(id), Integer.valueOf(kind));
-            }
-        }
-        return kind;
-    }
-
     private static void hookPanelClicks(ClassLoader loader) {
         try {
             XposedHelpers.findAndHookMethod("J6.f", loader, "executeBindings", new XC_MethodHook() {
@@ -1620,6 +1125,11 @@ public final class LauncherDexTaskbarHook {
                     XposedBridge.hookMethod(method, REMEMBER_NOTIFICATIONS);
                 } else if ("onListenerDisconnected".equals(name) && method.getParameterTypes().length == 0) {
                     XposedBridge.hookMethod(method, FORGET_NOTIFICATIONS);
+                } else if ("onNotificationPosted".equals(name)
+                        || "onNotificationRemoved".equals(name)
+                        || "onNotificationRankingUpdate".equals(name)
+                        || "f".equals(name)) {
+                    XposedBridge.hookMethod(method, REFRESH_NOTIFICATION_COUNT);
                 }
             }
             requestNotificationRebind();
@@ -1742,35 +1252,9 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         try {
-            Object active = listener.getClass().getMethod("getActiveNotifications").invoke(listener);
-            Object[] items = active instanceof Object[] ? (Object[]) active : new Object[0];
-            Method allow = null;
-            for (Method method : listener.getClass().getDeclaredMethods()) {
-                if ("d".equals(method.getName()) && method.getParameterTypes().length == 1) {
-                    allow = method;
-                    allow.setAccessible(true);
-                    break;
-                }
-            }
-            ArrayList<Object> kept = new ArrayList<Object>();
-            int raw = 0;
-            for (Object item : items) {
-                if (item == null) {
-                    continue;
-                }
-                raw++;
-                if (allow != null && !Boolean.TRUE.equals(allow.invoke(listener, item))) {
-                    continue;
-                }
-                kept.add(item);
-            }
-            if (kept.isEmpty() && raw > 0) {
-                for (Object item : items) {
-                    if (item != null) {
-                        kept.add(item);
-                    }
-                }
-            }
+            int[] rawOut = new int[1];
+            ArrayList<Object> kept = filterDexNotifications(listener, rawOut);
+            int raw = rawOut[0];
             if (raw == 0 && notifPublishTries < 4) {
                 notifPublishTries++;
                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
@@ -1803,6 +1287,9 @@ public final class LauncherDexTaskbarHook {
                     false, listener.getClass().getClassLoader());
             Object manager = broadcasts.getMethod("getInstance", Context.class).invoke(null, app);
             broadcasts.getMethod("sendBroadcast", intentType).invoke(manager, intent);
+            if (!repoCountActive) {
+                publishNotificationCount(countActiveNotifications(kept));
+            }
             if (kept.size() > 0 && !loggedNotifRefresh) {
                 loggedNotifRefresh = true;
                 XposedBridge.log(TAG + ": notification list reloaded " + kept.size() + " of " + raw);
@@ -1814,6 +1301,80 @@ public final class LauncherDexTaskbarHook {
             }
         }
     }
+
+    private static ArrayList<Object> filterDexNotifications(Object listener, int[] rawOut) throws Exception {
+        Object active = listener.getClass().getMethod("getActiveNotifications").invoke(listener);
+        Object[] items = active instanceof Object[] ? (Object[]) active : new Object[0];
+        Method allow = null;
+        for (Method method : listener.getClass().getDeclaredMethods()) {
+            if ("d".equals(method.getName()) && method.getParameterTypes().length == 1) {
+                allow = method;
+                allow.setAccessible(true);
+                break;
+            }
+        }
+        ArrayList<Object> kept = new ArrayList<Object>();
+        int raw = 0;
+        for (Object item : items) {
+            if (item == null) {
+                continue;
+            }
+            raw++;
+            if (allow != null && !Boolean.TRUE.equals(allow.invoke(listener, item))) {
+                continue;
+            }
+            kept.add(item);
+        }
+        if (kept.isEmpty() && raw > 0) {
+            for (Object item : items) {
+                if (item != null) {
+                    kept.add(item);
+                }
+            }
+        }
+        if (rawOut != null && rawOut.length > 0) {
+            rawOut[0] = raw;
+        }
+        return kept;
+    }
+
+    private static int countActiveNotifications(ArrayList<Object> items) {
+        int count = 0;
+        for (Object item : items) {
+            if (item == null) {
+                continue;
+            }
+            if (item instanceof StatusBarNotification) {
+                Notification notif = ((StatusBarNotification) item).getNotification();
+                if (notif != null && (notif.flags & Notification.FLAG_GROUP_SUMMARY) != 0) {
+                    continue;
+                }
+            }
+            count++;
+        }
+        return count;
+    }
+
+    private static void refreshNotificationCountFromListener(Object listener) {
+        if (listener == null || repoCountActive || !taskbarModsOn()) {
+            return;
+        }
+        try {
+            ArrayList<Object> kept = filterDexNotifications(listener, null);
+            publishNotificationCount(countActiveNotifications(kept));
+        } catch (Throwable ignored) {}
+    }
+
+    private static final XC_MethodHook REFRESH_NOTIFICATION_COUNT = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (!taskbarModsOn() || param.thisObject == null) {
+                return;
+            }
+            dexListener = param.thisObject;
+            refreshNotificationCountFromListener(param.thisObject);
+        }
+    };
 
     private static void requestNotificationRebind() {
         try {
@@ -1835,6 +1396,7 @@ public final class LauncherDexTaskbarHook {
             if (count < 0) {
                 return;
             }
+            repoCountActive = true;
             publishNotificationCount(count);
         }
     };
@@ -1844,7 +1406,11 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         notificationCount = count;
-        loggedBadge = true;
+        if (!loggedBadge) {
+            loggedBadge = true;
+            XposedBridge.log(TAG + ": notification badge count -> " + count
+                    + (repoCountActive ? " (repo)" : " (listener)"));
+        }
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
@@ -1911,6 +1477,9 @@ public final class LauncherDexTaskbarHook {
             group.addView(badge, layout);
             synchronized (NOTIFICATION_BADGES) {
                 NOTIFICATION_BADGES.put(group, new WeakReference<TextView>(badge));
+            }
+            if (!repoCountActive && dexListener != null) {
+                refreshNotificationCountFromListener(dexListener);
             }
             paintNotificationBadges();
         } catch (Throwable error) {
@@ -2034,6 +1603,29 @@ public final class LauncherDexTaskbarHook {
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not hook battery drawable: " + error);
         }
+        try {
+            Class<?> coroutine = Class.forName("R6.b", false, loader);
+            for (Method method : coroutine.getDeclaredMethods()) {
+                if ("invokeSuspend".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, RESIZE_BATTERY_COROUTINE);
+                }
+            }
+        } catch (Throwable error) {
+            XposedBridge.log(TAG + ": could not hook battery coroutine: " + error);
+        }
+        try {
+            Class<?> meter = Class.forName(
+                    "com.honeyspace.ui.honeypots.taskbar.presentation.battery.BatteryMeterView",
+                    false, loader);
+            for (Method method : meter.getDeclaredMethods()) {
+                String name = method.getName();
+                if ("onConfigurationChanged".equals(name) || "onAttachedToWindow".equals(name)) {
+                    XposedBridge.hookMethod(method, RESIZE_BATTERY_VIEW);
+                }
+            }
+        } catch (Throwable error) {
+            XposedBridge.log(TAG + ": could not hook battery view: " + error);
+        }
     }
 
     private static final XC_MethodHook WIDEN_BATTERY = new XC_MethodHook() {
@@ -2043,6 +1635,31 @@ public final class LauncherDexTaskbarHook {
                 return;
             }
             widenBatteryDrawable(param.thisObject);
+        }
+    };
+
+    private static final XC_MethodHook RESIZE_BATTERY_COROUTINE = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (!taskbarModsOn()) {
+                return;
+            }
+            Object meter = field(param.thisObject, "f");
+            if (meter instanceof View) {
+                scheduleBatterySize((View) meter, true);
+            }
+        }
+    };
+
+    private static final XC_MethodHook RESIZE_BATTERY_VIEW = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (!taskbarModsOn()) {
+                return;
+            }
+            if (param.thisObject instanceof View) {
+                scheduleBatterySize((View) param.thisObject, false);
+            }
         }
     };
 
@@ -2079,10 +1696,15 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         Object meter = field(field(binding, "p"), "f");
-        if (!(meter instanceof View)) {
-            return;
+        if (meter instanceof View) {
+            scheduleBatterySize((View) meter, false);
         }
-        final View view = (View) meter;
+    }
+
+    private static void scheduleBatterySize(final View view, boolean immediate) {
+        if (immediate && Looper.myLooper() == Looper.getMainLooper()) {
+            applyBatterySize(view);
+        }
         try {
             view.getClass().getMethod("post", Runnable.class).invoke(view, new Runnable() {
                 @Override
@@ -2120,16 +1742,20 @@ public final class LauncherDexTaskbarHook {
             int measuredWidth = icon.getWidth();
             int measuredHeight = icon.getHeight();
             boolean portrait = measuredWidth > 0 && measuredWidth <= measuredHeight;
+            ViewGroup.LayoutParams currentParams = icon.getLayoutParams();
+            boolean paramsMismatch = currentParams == null
+                    || currentParams.width != wantWidth
+                    || currentParams.height != wantHeight;
             int key = wantWidth * 10000 + wantHeight;
             synchronized (BATTERY_SIZE) {
                 Integer saved = BATTERY_SIZE.get(icon);
-                if (saved != null && saved.intValue() == key && !portrait) {
+                if (saved != null && saved.intValue() == key && !portrait && !paramsMismatch) {
                     return;
                 }
                 if (portrait) {
                     Integer prevTries = BATTERY_FIX_TRIES.get(icon);
                     int tries = prevTries == null ? 0 : prevTries.intValue();
-                    if (tries >= 6) {
+                    if (tries >= 6 && !paramsMismatch) {
                         return;
                     }
                     BATTERY_FIX_TRIES.put(icon, Integer.valueOf(tries + 1));
@@ -2137,6 +1763,11 @@ public final class LauncherDexTaskbarHook {
                 BATTERY_SIZE.put(icon, Integer.valueOf(key));
             }
             sizeBox(icon, wantWidth, wantHeight);
+            if (!loggedBattery) {
+                loggedBattery = true;
+                XposedBridge.log(TAG + ": battery icon sized to " + wantWidth + "x" + wantHeight
+                        + " (intrinsic " + intrinsicWidth + "x" + intrinsicHeight + ")");
+            }
         } catch (Throwable ignored) {}
     }
 
