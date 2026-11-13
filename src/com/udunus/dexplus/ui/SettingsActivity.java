@@ -1,6 +1,8 @@
 package com.udunus.dexplus.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
@@ -17,6 +19,7 @@ import android.view.Window;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -95,20 +98,31 @@ public class SettingsActivity extends Activity {
         mAccentColor = Color.rgb(59, 130, 246);
         mDividerColor = mIsDark ? Color.argb(28, 255, 255, 255) : Color.argb(22, 0, 0, 0);
 
+        boolean compact = getResources().getConfiguration().screenWidthDp < 600;
+
         LinearLayout rootSplit = new LinearLayout(this);
-        rootSplit.setOrientation(LinearLayout.HORIZONTAL);
+        rootSplit.setOrientation(compact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         rootSplit.setBackgroundColor(mBgColor);
 
-        // Left navigation rail (Sideways tabs)
-        LinearLayout sidebar = buildSidebar();
-        rootSplit.addView(sidebar, new LinearLayout.LayoutParams(
-                dp(260), ViewGroup.LayoutParams.MATCH_PARENT));
+        if (compact) {
+            rootSplit.addView(buildCompactTopBar(), new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            View topDivider = new View(this);
+            topDivider.setBackgroundColor(mDividerColor);
+            rootSplit.addView(topDivider, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        } else {
+            // Left navigation rail (Sideways tabs)
+            LinearLayout sidebar = buildSidebar();
+            rootSplit.addView(sidebar, new LinearLayout.LayoutParams(
+                    dp(260), ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // Vertical divider between sidebar and content
-        View railDivider = new View(this);
-        railDivider.setBackgroundColor(mDividerColor);
-        rootSplit.addView(railDivider, new LinearLayout.LayoutParams(
-                dp(1), ViewGroup.LayoutParams.MATCH_PARENT));
+            // Vertical divider between sidebar and content
+            View railDivider = new View(this);
+            railDivider.setBackgroundColor(mDividerColor);
+            rootSplit.addView(railDivider, new LinearLayout.LayoutParams(
+                    dp(1), ViewGroup.LayoutParams.MATCH_PARENT));
+        }
 
         // Right content area
         LinearLayout rightPane = new LinearLayout(this);
@@ -118,16 +132,17 @@ public class SettingsActivity extends Activity {
         // Page header bar
         LinearLayout pageHeader = new LinearLayout(this);
         pageHeader.setOrientation(LinearLayout.VERTICAL);
-        pageHeader.setPadding(dp(28), dp(22), dp(28), dp(14));
+        int hPad = dp(compact ? 18 : 28);
+        pageHeader.setPadding(hPad, dp(compact ? 14 : 22), hPad, dp(compact ? 10 : 14));
 
         mPageHeaderTitle = new TextView(this);
-        mPageHeaderTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f);
+        mPageHeaderTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 19f : 22f);
         mPageHeaderTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         mPageHeaderTitle.setTextColor(mTextPrimary);
         pageHeader.addView(mPageHeaderTitle);
 
         mPageHeaderSubtitle = new TextView(this);
-        mPageHeaderSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        mPageHeaderSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 12f : 13f);
         mPageHeaderSubtitle.setTextColor(mTextSecondary);
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -146,7 +161,7 @@ public class SettingsActivity extends Activity {
         mContentScroll.setFillViewport(true);
 
         FrameLayout pageContainer = new FrameLayout(this);
-        pageContainer.setPadding(dp(28), dp(20), dp(28), dp(32));
+        pageContainer.setPadding(hPad, dp(compact ? 14 : 20), hPad, dp(28));
 
         mTabPages.clear();
         mTabPages.add(buildGeneralPage());
@@ -167,8 +182,9 @@ public class SettingsActivity extends Activity {
         rightPane.addView(mContentScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        rootSplit.addView(rightPane, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        rootSplit.addView(rightPane, compact
+                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+                : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
 
         selectTab(mSelectedTab);
         setContentView(rootSplit);
@@ -178,6 +194,88 @@ public class SettingsActivity extends Activity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putInt(STATE_SELECTED_TAB, mSelectedTab);
+    }
+
+    private LinearLayout buildCompactTopBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        bar.setBackgroundColor(mSidebarColor);
+        bar.setPadding(dp(14), dp(14), dp(14), dp(10));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(4), 0, dp(4), dp(10));
+
+        TextView appTitle = new TextView(this);
+        appTitle.setText("Dex+");
+        appTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f);
+        appTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        appTitle.setTextColor(mTextPrimary);
+        header.addView(appTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        boolean active = isModuleActive();
+        TextView statusBadge = new TextView(this);
+        statusBadge.setText(active ? "●  Active in LSPosed" : "●  Not Active in LSPosed");
+        statusBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        statusBadge.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        statusBadge.setTextColor(active ? Color.rgb(16, 185, 129) : Color.rgb(245, 158, 11));
+        header.addView(statusBadge);
+        bar.addView(header);
+
+        HorizontalScrollView tabScroll = new HorizontalScrollView(this);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        mTabButtons.clear();
+        mTabTitles.clear();
+        mTabSubtitles.clear();
+        mTabIndicators.clear();
+
+        for (int i = 0; i < TAB_NAMES.length; i++) {
+            final int index = i;
+            LinearLayout pill = new LinearLayout(this);
+            pill.setOrientation(LinearLayout.VERTICAL);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(dp(12), dp(8), dp(12), dp(6));
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText(TAB_NAMES[i]);
+            titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+            titleTv.setSingleLine(true);
+            pill.addView(titleTv);
+
+            View indicator = new View(this);
+            GradientDrawable indBg = new GradientDrawable();
+            indBg.setCornerRadius(dp(2));
+            indBg.setColor(mAccentColor);
+            indicator.setBackground(indBg);
+            LinearLayout.LayoutParams indLp = new LinearLayout.LayoutParams(dp(20), dp(3));
+            indLp.topMargin = dp(4);
+            pill.addView(indicator, indLp);
+
+            pill.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    selectTab(index);
+                }
+            });
+
+            LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            itemLp.setMarginEnd(dp(6));
+            tabRow.addView(pill, itemLp);
+
+            mTabButtons.add(pill);
+            mTabTitles.add(titleTv);
+            mTabIndicators.add(indicator);
+        }
+
+        tabScroll.addView(tabRow);
+        bar.addView(tabScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return bar;
     }
 
     private LinearLayout buildSidebar() {
@@ -322,8 +420,10 @@ public class SettingsActivity extends Activity {
             titleTv.setTypeface(Typeface.create("sans-serif-medium", selected ? Typeface.BOLD : Typeface.NORMAL));
             titleTv.setTextColor(selected ? mAccentColor : mTextPrimary);
 
-            TextView subTv = mTabSubtitles.get(i);
-            subTv.setTextColor(mTextSecondary);
+            if (i < mTabSubtitles.size()) {
+                TextView subTv = mTabSubtitles.get(i);
+                subTv.setTextColor(mTextSecondary);
+            }
 
             View ind = mTabIndicators.get(i);
             ind.setVisibility(selected ? View.VISIBLE : View.INVISIBLE);
@@ -406,10 +506,20 @@ public class SettingsActivity extends Activity {
         resetBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                mPrefs.edit().clear().commit();
-                ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
-                Toast.makeText(SettingsActivity.this, "Default settings restored", Toast.LENGTH_SHORT).show();
-                recreate();
+                new AlertDialog.Builder(SettingsActivity.this)
+                        .setTitle("Restore Default Settings")
+                        .setMessage("Reset all Dex+ preferences to their default values?")
+                        .setPositiveButton("Restore", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                ModConfig.resetToDefaults(SettingsActivity.this, mPrefs);
+                                Toast.makeText(SettingsActivity.this,
+                                        "Default settings restored", Toast.LENGTH_SHORT).show();
+                                recreate();
+                            }
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
             }
         });
         row1.addView(resetBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -569,11 +679,21 @@ public class SettingsActivity extends Activity {
         resetShortcutsBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Intent cmd = new Intent(ModConfig.ACTION_DESKTOP_COMMAND);
-                cmd.putExtra("command", "reset_shortcuts");
-                sendBroadcast(cmd);
-                Toast.makeText(SettingsActivity.this,
-                        "Workspace shortcuts reset to defaults", Toast.LENGTH_SHORT).show();
+                new AlertDialog.Builder(SettingsActivity.this)
+                        .setTitle("Reset Workspace Shortcuts")
+                        .setMessage("Restore the default set of app shortcuts on the dedicated workspace?")
+                        .setPositiveButton("Reset", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                Intent cmd = new Intent(ModConfig.ACTION_DESKTOP_COMMAND);
+                                cmd.putExtra("command", "reset_shortcuts");
+                                sendBroadcast(cmd);
+                                Toast.makeText(SettingsActivity.this,
+                                        "Workspace shortcuts reset to defaults", Toast.LENGTH_SHORT).show();
+                            }
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
             }
         });
         row.addView(resetShortcutsBtn);
@@ -890,14 +1010,28 @@ public class SettingsActivity extends Activity {
     /** Samsung's freeform corner size, in dp, so the slider starts on the current look. */
     private int systemCornerDp() {
         int px = 0;
-        int[] ids = new int[] {0x01050305, 0x010501e9};
-        for (int id : ids) {
+        String[] names = new String[] {"mw_desktop_external_display_corner_radius", "freeform_rounded_corner_radius"};
+        for (int i = 0; i < names.length; i++) {
             try {
-                px = getResources().getDimensionPixelSize(id);
-                if (px > 0) {
-                    break;
+                int id = getResources().getIdentifier(names[i], "dimen", "android");
+                if (id != 0) {
+                    px = getResources().getDimensionPixelSize(id);
+                    if (px > 0) {
+                        break;
+                    }
                 }
             } catch (Throwable ignored) {}
+        }
+        if (px <= 0) {
+            int[] fallbackIds = new int[] {0x01050305, 0x010501e9};
+            for (int id : fallbackIds) {
+                try {
+                    px = getResources().getDimensionPixelSize(id);
+                    if (px > 0) {
+                        break;
+                    }
+                } catch (Throwable ignored) {}
+            }
         }
         float density = getResources().getDisplayMetrics().density;
         if (px <= 0 || density <= 0f) {

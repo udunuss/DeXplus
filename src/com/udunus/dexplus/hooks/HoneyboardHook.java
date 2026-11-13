@@ -2,6 +2,9 @@ package com.udunus.dexplus.hooks;
 
 import android.app.AndroidAppHelper;
 import android.content.Context;
+import android.database.ContentObserver;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 
 import com.udunus.dexplus.util.ModConfig;
@@ -19,6 +22,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class HoneyboardHook {
     private static final String PHYSICAL_TOOLBAR = "SETTINGS_PHYSICAL_KEYBOARD_TOOLBAR";
     private static final String EFFECTS_KEY = "externaldex_effects";
+    private static volatile boolean effectsWatching = false;
+    private static volatile boolean cachedEffectsActive = false;
     private static boolean loggedToolbar = false;
 
     private HoneyboardHook() {}
@@ -51,6 +56,36 @@ public final class HoneyboardHook {
         }
     }
 
+    private static void ensureEffectsObserver(final Context context) {
+        if (effectsWatching || context == null) return;
+        synchronized (HoneyboardHook.class) {
+            if (effectsWatching) return;
+            final Context appCtx = context.getApplicationContext() != null
+                    ? context.getApplicationContext() : context;
+            cachedEffectsActive = readEffects(appCtx);
+            try {
+                appCtx.getContentResolver().registerContentObserver(
+                        Settings.Global.getUriFor(EFFECTS_KEY),
+                        false,
+                        new ContentObserver(new Handler(Looper.getMainLooper())) {
+                            @Override
+                            public void onChange(boolean selfChange) {
+                                cachedEffectsActive = readEffects(appCtx);
+                            }
+                        });
+                effectsWatching = true;
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static boolean readEffects(Context context) {
+        try {
+            return Settings.Global.getInt(context.getContentResolver(), EFFECTS_KEY, 0) == 1;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static boolean shouldHideToolbar() {
         try {
             Context context = AndroidAppHelper.currentApplication();
@@ -62,10 +97,12 @@ public final class HoneyboardHook {
                 }
             }
             if (context == null) return false;
-            if (!ModConfig.getBoolean(context, ModConfig.KEY_HIDE_PHYSICAL_KB_TOOLBAR, true)) {
+            if (!ModConfig.isModuleEnabled(context)
+                    || !ModConfig.getBoolean(context, ModConfig.KEY_HIDE_PHYSICAL_KB_TOOLBAR, true)) {
                 return false;
             }
-            return Settings.Global.getInt(context.getContentResolver(), EFFECTS_KEY, 0) == 1;
+            ensureEffectsObserver(context);
+            return effectsWatching ? cachedEffectsActive : readEffects(context);
         } catch (Throwable t) {
             return false;
         }

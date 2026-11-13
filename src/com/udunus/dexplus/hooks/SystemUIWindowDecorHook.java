@@ -31,6 +31,7 @@ import android.widget.Toast;
 
 import com.udunus.dexplus.util.ModConfig;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -65,16 +66,34 @@ public final class SystemUIWindowDecorHook {
     private static final String INSET_KEY = "externaldex_status_inset";
     private static final String EFFECTS_KEY = "externaldex_effects";
 
-    private static final int MAXIMIZE_BUTTON = 0x7e0a075d;
-    private static final int TOGGLE_FREEFORM = 0x7e0a0e72;
-    private static final int TOGGLE_IMMERSIVE = 0x7e0a0e73;
-    private static final int FULLSCREEN_BUTTON = 0x7e0a0505;
-    private static final int EXPAND_MENU_BUTTON = 0x7e0a0491;
-    private static final int REMOVE_FROM_WORKSPACE = 0x7e0a0a8e;
-    private static final int MINIMIZE_WINDOW = 0x7e0a07bb;
-    private static final int APP_ICON = 0x7e0a0131;
-    private static final int OPEN_MENU_BUTTON = 0x7e0a093e;
-    private static final int CLOSE_WINDOW = 0x7e0a02e9;
+    private static final int IDX_MAXIMIZE_BUTTON = 0;
+    private static final int IDX_TOGGLE_FREEFORM = 1;
+    private static final int IDX_TOGGLE_IMMERSIVE = 2;
+    private static final int IDX_FULLSCREEN_BUTTON = 3;
+    private static final int IDX_EXPAND_MENU_BUTTON = 4;
+    private static final int IDX_REMOVE_FROM_WORKSPACE = 5;
+    private static final int IDX_MINIMIZE_WINDOW = 6;
+    private static final int IDX_APP_ICON = 7;
+    private static final int IDX_OPEN_MENU_BUTTON = 8;
+    private static final int IDX_CLOSE_WINDOW = 9;
+
+    private static final String[] SYSUI_ID_NAMES = {
+            "maximize_window",
+            "toggle_freeform_window",
+            "toggle_immersive_window",
+            "fullscreen_button",
+            "expand_menu_button",
+            "remove_from_workspace",
+            "minimize_window",
+            "application_icon",
+            "open_menu_button",
+            "close_window"
+    };
+    private static final int[] SYSUI_ID_FALLBACKS = {
+            0x7e0a075d, 0x7e0a0e72, 0x7e0a0e73, 0x7e0a0505, 0x7e0a0491,
+            0x7e0a0a8e, 0x7e0a07bb, 0x7e0a0131, 0x7e0a093e, 0x7e0a02e9
+    };
+    private static volatile int[] cachedSysUiIds;
     private static final String PIN_TAG = "internaldex.pin";
     private static final String BACK_TAG = "internaldex.back";
     private static final String SLIDER_TAG = "internaldex.opacity";
@@ -90,8 +109,8 @@ public final class SystemUIWindowDecorHook {
 
     private static final Set<Integer> ALPHA_MANUAL = Collections.synchronizedSet(new HashSet<Integer>());
     private static final Set<Integer> CLEARED_ALWAYS_ON_TOP = Collections.synchronizedSet(new HashSet<Integer>());
-    private static final WeakHashMap<View, Object> PIN_DECORS = new WeakHashMap<View, Object>();
-    private static final WeakHashMap<View, Object> BACK_DECORS = new WeakHashMap<View, Object>();
+    private static final WeakHashMap<View, WeakReference<Object>> PIN_DECORS = new WeakHashMap<View, WeakReference<Object>>();
+    private static final WeakHashMap<View, WeakReference<Object>> BACK_DECORS = new WeakHashMap<View, WeakReference<Object>>();
     private static final WeakHashMap<View, Boolean> MENU_SHRUNK = new WeakHashMap<View, Boolean>();
 
     private static final ThreadLocal<Boolean> PIN_STAMPING = new ThreadLocal<Boolean>();
@@ -134,8 +153,6 @@ public final class SystemUIWindowDecorHook {
     private static boolean loggedPin;
     private static boolean loggedPinMiss;
     private static boolean loggedPinRaise;
-    private static boolean loggedPinTint;
-    private static boolean loggedPinRelease;
     private static boolean loggedFullscreenGuard;
     private static boolean loggedMaximizeHide;
     private static boolean loggedFullscreenHide;
@@ -162,8 +179,19 @@ public final class SystemUIWindowDecorHook {
         ModConfig.addChangeListener(new Runnable() {
             @Override
             public void run() {
-                applyDefaultOpacityToKnown();
-                applyCornerRadiusToKnown();
+                Runnable refresh = new Runnable() {
+                    @Override
+                    public void run() {
+                        applyDefaultOpacityToKnown();
+                        applyCornerRadiusToKnown();
+                        refreshKnownCaptions();
+                    }
+                };
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    refresh.run();
+                } else {
+                    new Handler(Looper.getMainLooper()).post(refresh);
+                }
             }
         });
         XposedHelpers.findAndHookMethod("android.app.Application", lpparam.classLoader,
@@ -171,7 +199,12 @@ public final class SystemUIWindowDecorHook {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         if (param.args.length > 0 && param.args[0] instanceof Context) {
-                            ModConfig.registerRestartReceiver((Context) param.args[0], "systemui");
+                            Context appCtx = (Context) param.args[0];
+                            if (systemUiContext == null) {
+                                systemUiContext = appCtx;
+                            }
+                            ModConfig.ensureInitialized(appCtx);
+                            ModConfig.registerRestartReceiver(appCtx, "systemui");
                         }
                     }
                 });
@@ -254,8 +287,68 @@ public final class SystemUIWindowDecorHook {
         }
     }
 
+    private static int sysUiId(Context ctx, int idx) {
+        int[] ids = cachedSysUiIds;
+        if (ids == null) {
+            Context source = ctx != null ? ctx : systemUiContext;
+            if (source != null) {
+                try {
+                    android.content.res.Resources res = source.getResources();
+                    String pkg = source.getPackageName();
+                    int[] resolved = new int[SYSUI_ID_NAMES.length];
+                    boolean anyResolved = false;
+                    for (int i = 0; i < SYSUI_ID_NAMES.length; i++) {
+                        int id = res.getIdentifier(SYSUI_ID_NAMES[i], "id", pkg);
+                        if (id == 0) {
+                            id = res.getIdentifier(SYSUI_ID_NAMES[i], "id", "com.android.systemui");
+                        }
+                        if (id != 0) {
+                            anyResolved = true;
+                            resolved[i] = id;
+                        } else {
+                            resolved[i] = SYSUI_ID_FALLBACKS[i];
+                        }
+                    }
+                    if (anyResolved) {
+                        cachedSysUiIds = resolved;
+                    }
+                    ids = resolved;
+                } catch (Throwable ignored) {}
+            }
+        }
+        return ids != null ? ids[idx] : SYSUI_ID_FALLBACKS[idx];
+    }
+
+    private static View findSysUiView(View root, int idx) {
+        return root == null ? null : root.findViewById(sysUiId(root.getContext(), idx));
+    }
+
+    private static int resolveSystemCornerPx(Context ctx) {
+        Context source = ctx != null ? ctx : systemUiContext;
+        if (source == null) {
+            return -1;
+        }
+        String[] names = {"mw_desktop_external_display_corner_radius", "freeform_rounded_corner_radius"};
+        for (int i = 0; i < names.length; i++) {
+            try {
+                int id = source.getResources().getIdentifier(names[i], "dimen", "android");
+                if (id != 0) {
+                    int px = source.getResources().getDimensionPixelSize(id);
+                    if (px >= 0) {
+                        return px;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return -1;
+    }
+
     private static int floatingRadiusPx(Context ctx, int systemPx) {
-        int dp = ModConfig.getInt(ctx, ModConfig.KEY_WINDOW_CORNER_RADIUS, -1);
+        Context source = ctx != null ? ctx : systemUiContext;
+        if (source != null && !ModConfig.isModuleEnabled(source)) {
+            return systemPx;
+        }
+        int dp = ModConfig.getInt(source, ModConfig.KEY_WINDOW_CORNER_RADIUS, -1);
         if (dp < 0) {
             return systemPx;
         }
@@ -263,7 +356,6 @@ public final class SystemUIWindowDecorHook {
             return 0;
         }
         float density = 1f;
-        Context source = ctx != null ? ctx : systemUiContext;
         if (source != null) {
             density = source.getResources().getDisplayMetrics().density;
         }
@@ -310,17 +402,33 @@ public final class SystemUIWindowDecorHook {
         synchronized (TASK_CHROME) {
             windows.addAll(TASK_CHROME.values());
         }
+        int fallback = resolveSystemCornerPx(systemUiContext);
+        int px = floatingRadiusPx(systemUiContext, fallback);
+        if (px < 0) {
+            return;
+        }
         for (int i = 0; i < windows.size(); i++) {
             TaskChrome chrome = windows.get(i);
             if (chrome == null || !surfaceValid(chrome.task)) {
                 continue;
             }
-            int px = floatingRadiusPx(systemUiContext, -1);
-            if (px < 0) {
-                continue;
-            }
             setSurfaceCorner(chrome.task, px);
             applyOutlineRadius(chrome.host, px);
+        }
+    }
+
+    private static void refreshKnownCaptions() {
+        ArrayList<TaskChrome> windows = new ArrayList<TaskChrome>();
+        synchronized (TASK_CHROME) {
+            windows.addAll(TASK_CHROME.values());
+        }
+        for (int i = 0; i < windows.size(); i++) {
+            TaskChrome chrome = windows.get(i);
+            if (chrome != null && chrome.host != null) {
+                try {
+                    prepareCaption(chrome.host);
+                } catch (Throwable ignored) {}
+            }
         }
     }
 
@@ -572,7 +680,7 @@ public final class SystemUIWindowDecorHook {
     private static final XC_MethodHook CLEAR_FULLSCREEN_REGION = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!collapseStatus) {
+            if (!topEdgeMaximizeOn()) {
                 return;
             }
             Object region = param.getResult();
@@ -998,7 +1106,9 @@ public final class SystemUIWindowDecorHook {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
             View view = captionView(param.args);
-            if (view == null || view.getId() != MAXIMIZE_BUTTON || !modificationsOn(view)) {
+            if (view == null
+                    || view.getId() != sysUiId(view.getContext(), IDX_MAXIMIZE_BUTTON)
+                    || !modificationsOn(view)) {
                 return;
             }
             try {
@@ -1026,7 +1136,8 @@ public final class SystemUIWindowDecorHook {
                 return;
             }
             int id = view.getId();
-            if (id != MAXIMIZE_BUTTON && id != TOGGLE_FREEFORM) {
+            if (id != sysUiId(ctx, IDX_MAXIMIZE_BUTTON)
+                    && id != sysUiId(ctx, IDX_TOGGLE_FREEFORM)) {
                 return;
             }
             try {
@@ -1121,7 +1232,7 @@ public final class SystemUIWindowDecorHook {
         return true;
     }
 
-    private static long immersiveGuardUntil;
+    private static volatile long immersiveGuardUntil;
 
     /** Drag-to-restore must not pull an immersive window back down to the maximized size. */
     private static boolean blockDragForImmersive(Object listener) {
@@ -1161,25 +1272,30 @@ public final class SystemUIWindowDecorHook {
         if (root == null) {
             return false;
         }
+        Context ctx = root.getContext();
         int x = Math.round(event.getRawX());
         int y = Math.round(event.getRawY());
-        int[] ids = new int[] {
-                MAXIMIZE_BUTTON, TOGGLE_FREEFORM, TOGGLE_IMMERSIVE, FULLSCREEN_BUTTON,
-                EXPAND_MENU_BUTTON, MINIMIZE_WINDOW, OPEN_MENU_BUTTON, CLOSE_WINDOW, APP_ICON
+        int[] indices = new int[] {
+                IDX_MAXIMIZE_BUTTON, IDX_TOGGLE_FREEFORM, IDX_TOGGLE_IMMERSIVE, IDX_FULLSCREEN_BUTTON,
+                IDX_EXPAND_MENU_BUTTON, IDX_MINIMIZE_WINDOW, IDX_OPEN_MENU_BUTTON, IDX_CLOSE_WINDOW, IDX_APP_ICON
         };
         int[] location = new int[2];
-        for (int i = 0; i < ids.length; i++) {
-            View button = root.findViewById(ids[i]);
-            if (button == null || button.getVisibility() != View.VISIBLE) {
-                continue;
-            }
-            button.getLocationOnScreen(location);
-            if (x >= location[0] && x < location[0] + button.getWidth()
-                    && y >= location[1] && y < location[1] + button.getHeight()) {
+        for (int i = 0; i < indices.length; i++) {
+            if (hitVisibleView(root.findViewById(sysUiId(ctx, indices[i])), x, y, location)) {
                 return true;
             }
         }
-        return false;
+        return hitVisibleView(root.findViewWithTag(PIN_TAG), x, y, location)
+                || hitVisibleView(root.findViewWithTag(BACK_TAG), x, y, location);
+    }
+
+    private static boolean hitVisibleView(View button, int x, int y, int[] location) {
+        if (button == null || button.getVisibility() != View.VISIBLE) {
+            return false;
+        }
+        button.getLocationOnScreen(location);
+        return x >= location[0] && x < location[0] + button.getWidth()
+                && y >= location[1] && y < location[1] + button.getHeight();
     }
 
     private static void commitImmersive(Object decor, Object task) {
@@ -1323,7 +1439,8 @@ public final class SystemUIWindowDecorHook {
                     return;
                 }
                 View button = (View) param.thisObject;
-                if (button.getId() != MINIMIZE_WINDOW || !(button.getParent() instanceof ViewGroup)) {
+                if (button.getId() != sysUiId(button.getContext(), IDX_MINIMIZE_WINDOW)
+                        || !(button.getParent() instanceof ViewGroup)) {
                     return;
                 }
                 View pin = findPin((ViewGroup) button.getParent());
@@ -1459,7 +1576,7 @@ public final class SystemUIWindowDecorHook {
         fitOpenMenu(root);
         rememberChrome(decor);
         applyDefaultOpacity(decor, ctx, on);
-        View minimize = root.findViewById(MINIMIZE_WINDOW);
+        View minimize = findSysUiView(root, IDX_MINIMIZE_WINDOW);
         if (minimize == null || !(minimize.getParent() instanceof ViewGroup)) {
             if (on) {
                 raisePinned(surfaceFor(taskId(field(decor, "mTaskInfo"))));
@@ -1500,7 +1617,7 @@ public final class SystemUIWindowDecorHook {
                 XposedBridge.log(TAG + ": pin button added");
             }
         }
-        PIN_DECORS.put(pin, decor);
+        PIN_DECORS.put(pin, new WeakReference<Object>(decor));
         pin.setVisibility(View.VISIBLE);
         Integer id = taskId(field(decor, "mTaskInfo"));
         boolean pinned = id != null && PINNED_IDS.contains(id);
@@ -1511,7 +1628,8 @@ public final class SystemUIWindowDecorHook {
         pin.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                Object target = PIN_DECORS.get(view);
+                WeakReference<Object> ref = PIN_DECORS.get(view);
+                Object target = ref == null ? null : ref.get();
                 if (target != null) {
                     togglePin(target, view);
                 }
@@ -1521,8 +1639,8 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void settleMaximizeButton(Object decor, View root, boolean on) {
-        View maximize = root.findViewById(MAXIMIZE_BUTTON);
-        View freeform = root.findViewById(TOGGLE_FREEFORM);
+        View maximize = findSysUiView(root, IDX_MAXIMIZE_BUTTON);
+        View freeform = findSysUiView(root, IDX_TOGGLE_FREEFORM);
         boolean freeformShown = on && freeform != null && freeform.getVisibility() == View.VISIBLE;
         if (maximize != null && Boolean.TRUE.equals(HIDDEN_MAXIMIZE.get(maximize)) && !freeformShown) {
             maximize.setVisibility(View.VISIBLE);
@@ -1537,7 +1655,8 @@ public final class SystemUIWindowDecorHook {
             }
         }
         View holdTarget = freeformShown ? freeform : maximize;
-        if (!on || holdTarget == null) {
+        if (!on || holdTarget == null
+                || !ModConfig.getBoolean(root.getContext(), ModConfig.KEY_HOLD_MAXIMIZE_FULLSCREEN, true)) {
             return;
         }
         Object listener = field(decor, "mOnCaptionLongClickListener");
@@ -1553,8 +1672,8 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void hideFullscreenButton(View root, boolean on) {
-        View immersive = root.findViewById(TOGGLE_IMMERSIVE);
-        View fullscreen = root.findViewById(FULLSCREEN_BUTTON);
+        View immersive = findSysUiView(root, IDX_TOGGLE_IMMERSIVE);
+        View fullscreen = findSysUiView(root, IDX_FULLSCREEN_BUTTON);
         if (!on) {
             // Leave Samsung's own fullscreen and exit buttons alone. Forcing both
             // visible puts an extra control on the title bar and breaks fullscreen.
@@ -1562,7 +1681,7 @@ public final class SystemUIWindowDecorHook {
             releaseFullscreenHide(fullscreen);
             return;
         }
-        View freeform = root.findViewById(TOGGLE_FREEFORM);
+        View freeform = findSysUiView(root, IDX_TOGGLE_FREEFORM);
         boolean freeformShown = freeform != null && freeform.getVisibility() == View.VISIBLE;
         if (!freeformShown) {
             showFullscreenRestore(immersive);
@@ -1573,7 +1692,7 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void hideAppChevron(View root, boolean on) {
-        View chevron = root.findViewById(EXPAND_MENU_BUTTON);
+        View chevron = findSysUiView(root, IDX_EXPAND_MENU_BUTTON);
         if (chevron == null) {
             return;
         }
@@ -1620,22 +1739,33 @@ public final class SystemUIWindowDecorHook {
         protected void afterHookedMethod(MethodHookParam param) {
             try {
                 ViewGroup menu = menuRoot(param);
-                if (menu == null || !modificationsOn(menu)) {
+                if (menu == null) {
+                    return;
+                }
+                if (!modificationsOn(menu)) {
+                    removeChildByTag(menu, SLIDER_TAG);
+                    removeChildByTag(menu, TOOLS_TAG);
                     return;
                 }
                 Context ctx = menu.getContext();
                 if (!ModConfig.getBoolean(ctx, ModConfig.KEY_HEADER_MENU_CUSTOM_ENABLED, true)) {
+                    removeChildByTag(menu, SLIDER_TAG);
+                    removeChildByTag(menu, TOOLS_TAG);
                     return;
                 }
-                View removeBtn = menu.findViewById(REMOVE_FROM_WORKSPACE);
+                View removeBtn = findSysUiView(menu, IDX_REMOVE_FROM_WORKSPACE);
                 if (ModConfig.getBoolean(ctx, ModConfig.KEY_ADD_APP_INFO_BTN, true)) {
                     rewriteAppInfo(removeBtn, param.thisObject);
                 }
                 if (ModConfig.getBoolean(ctx, ModConfig.KEY_ADD_TRANSPARENCY_SLIDER, true)) {
                     ensureOpacitySlider(menu, param.thisObject);
+                } else {
+                    removeChildByTag(menu, SLIDER_TAG);
                 }
                 if (ModConfig.getBoolean(ctx, ModConfig.KEY_ADD_EXTRA_WINDOW_TOOLS, true)) {
                     ensureExtraTools(menu, param.thisObject);
+                } else {
+                    removeChildByTag(menu, TOOLS_TAG);
                 }
             } catch (Throwable error) {
                 if (!loggedMenu) {
@@ -1645,6 +1775,13 @@ public final class SystemUIWindowDecorHook {
             }
         }
     };
+
+    private static void removeChildByTag(ViewGroup parent, String tag) {
+        View existing = findChildByTag(parent, tag);
+        if (existing != null) {
+            parent.removeView(existing);
+        }
+    }
 
     private static final XC_MethodHook GROW_MENU_FOR_SLIDER = new XC_MethodHook() {
         @Override
@@ -1679,7 +1816,7 @@ public final class SystemUIWindowDecorHook {
             for (int i = 0; i < param.args.length; i++) {
                 Object arg = param.args[i];
                 if (arg instanceof ViewGroup
-                        && ((View) arg).findViewById(REMOVE_FROM_WORKSPACE) != null) {
+                        && findSysUiView((View) arg, IDX_REMOVE_FROM_WORKSPACE) != null) {
                     return (ViewGroup) arg;
                 }
             }
@@ -1724,7 +1861,7 @@ public final class SystemUIWindowDecorHook {
         row.setPadding(pad, px(context, 8), pad, px(context, 4));
         TextView label = new TextView(context);
         label.setText("Transparency");
-        label.setTextColor(menuTextColor(menu.findViewById(REMOVE_FROM_WORKSPACE)));
+        label.setTextColor(menuTextColor(findSysUiView(menu, IDX_REMOVE_FROM_WORKSPACE)));
         row.addView(label);
         SeekBar bar = new SeekBar(context);
         bar.setMax(100);
@@ -1773,7 +1910,7 @@ public final class SystemUIWindowDecorHook {
         if (context == null) {
             return;
         }
-        int textColor = menuTextColor(menu.findViewById(REMOVE_FROM_WORKSPACE));
+        int textColor = menuTextColor(findSysUiView(menu, IDX_REMOVE_FROM_WORKSPACE));
         DisplayMetrics dm = context.getResources().getDisplayMetrics();
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2127,7 +2264,11 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void applyDefaultOpacityToKnown() {
-        if (systemUiContext == null || !modificationsOn(null)) {
+        if (systemUiContext == null) {
+            return;
+        }
+        if (!modificationsOn(null)) {
+            resetWindowAlphas();
             return;
         }
         ArrayList<TaskChrome> windows = new ArrayList<TaskChrome>();
@@ -2308,11 +2449,16 @@ public final class SystemUIWindowDecorHook {
 
     /** Caption buttons must keep their own clicks. A drag-to-restore on them turns a long-press into the maximize animation. */
     private static boolean captionControl(View view) {
+        if (PIN_TAG.equals(view.getTag()) || BACK_TAG.equals(view.getTag())) {
+            return true;
+        }
         int id = view.getId();
-        if (id == MAXIMIZE_BUTTON || id == TOGGLE_FREEFORM || id == TOGGLE_IMMERSIVE
-                || id == FULLSCREEN_BUTTON || id == EXPAND_MENU_BUTTON || id == MINIMIZE_WINDOW
-                || id == OPEN_MENU_BUTTON || id == CLOSE_WINDOW || id == APP_ICON
-                || BACK_TAG.equals(view.getTag())) {
+        Context ctx = view.getContext();
+        if (id == sysUiId(ctx, IDX_MAXIMIZE_BUTTON) || id == sysUiId(ctx, IDX_TOGGLE_FREEFORM)
+                || id == sysUiId(ctx, IDX_TOGGLE_IMMERSIVE) || id == sysUiId(ctx, IDX_FULLSCREEN_BUTTON)
+                || id == sysUiId(ctx, IDX_EXPAND_MENU_BUTTON) || id == sysUiId(ctx, IDX_MINIMIZE_WINDOW)
+                || id == sysUiId(ctx, IDX_OPEN_MENU_BUTTON) || id == sysUiId(ctx, IDX_CLOSE_WINDOW)
+                || id == sysUiId(ctx, IDX_APP_ICON)) {
             return true;
         }
         String name = view.getClass().getName();
@@ -2320,8 +2466,8 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void addBackButton(Object decor, View root, boolean on) {
-        View icon = root.findViewById(APP_ICON);
-        View menu = root.findViewById(OPEN_MENU_BUTTON);
+        View icon = findSysUiView(root, IDX_APP_ICON);
+        View menu = findSysUiView(root, IDX_OPEN_MENU_BUTTON);
         View anchor = menu != null ? menu : icon;
         if (!(anchor != null && anchor.getParent() instanceof ViewGroup)) {
             return;
@@ -2345,7 +2491,7 @@ public final class SystemUIWindowDecorHook {
             int index = group.indexOfChild(anchor);
             group.addView(created, index < 0 ? 0 : index);
             placeBackButton(icon != null ? icon : anchor, created);
-            View minimize = root.findViewById(MINIMIZE_WINDOW);
+            View minimize = findSysUiView(root, IDX_MINIMIZE_WINDOW);
             if (minimize != null) {
                 copyBackground(minimize, created);
                 matchPinColor(minimize, created);
@@ -2361,7 +2507,7 @@ public final class SystemUIWindowDecorHook {
         } else {
             placeBackButton(icon != null ? icon : anchor, back);
         }
-        BACK_DECORS.put(back, decor);
+        BACK_DECORS.put(back, new WeakReference<Object>(decor));
         back.setVisibility(View.VISIBLE);
         if (back instanceof ImageView) {
             back.setAlpha(1f);
@@ -2370,7 +2516,8 @@ public final class SystemUIWindowDecorHook {
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                Object target = BACK_DECORS.get(view);
+                WeakReference<Object> ref = BACK_DECORS.get(view);
+                Object target = ref == null ? null : ref.get();
                 if (target == null) {
                     return;
                 }
@@ -2385,8 +2532,8 @@ public final class SystemUIWindowDecorHook {
      * to the icon height.
      */
     private static void fitOpenMenu(View root) {
-        View menu = root.findViewById(OPEN_MENU_BUTTON);
-        final View icon = root.findViewById(APP_ICON);
+        View menu = findSysUiView(root, IDX_OPEN_MENU_BUTTON);
+        final View icon = findSysUiView(root, IDX_APP_ICON);
         if (!(menu instanceof ViewGroup) || icon == null) {
             return;
         }
@@ -3143,10 +3290,16 @@ public final class SystemUIWindowDecorHook {
         }
     }
 
+    private static boolean topEdgeMaximizeOn() {
+        return collapseStatus
+                && modificationsOn(null)
+                && ModConfig.getBoolean(systemUiContext, ModConfig.KEY_TOP_EDGE_MAXIMIZE, true);
+    }
+
     private static final XC_MethodHook MAXIMIZE_INSTEAD_OF_EXIT = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!collapseStatus) {
+            if (!topEdgeMaximizeOn()) {
                 return;
             }
             Object result = param.getResult();

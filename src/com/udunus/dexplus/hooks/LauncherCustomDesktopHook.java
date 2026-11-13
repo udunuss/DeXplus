@@ -232,9 +232,11 @@ public final class LauncherCustomDesktopHook {
      * when enabled.
      */
     private static final class ClassicDexDesktopView extends FrameLayout {
+        private final ScrollView mScrollView;
         private final GridLayout mGridLayout;
         private final View mPopupAnchor;
         private View mSelectedCell;
+        private BroadcastReceiver mCommandReceiver;
         private long mLastClickTime = 0L;
         private String mLastClickedComponent = null;
         private float mLastTouchX = 200f;
@@ -252,30 +254,38 @@ public final class LauncherCustomDesktopHook {
             mPopupAnchor.setVisibility(View.INVISIBLE);
             addView(mPopupAnchor, anchorLp);
 
+            mScrollView = new ScrollView(context);
+            mScrollView.setFillViewport(true);
+            mScrollView.setVerticalScrollBarEnabled(false);
+
             mGridLayout = new GridLayout(context);
             mGridLayout.setOrientation(GridLayout.VERTICAL); // Top-to-bottom, then left-to-right
-            FrameLayout.LayoutParams gridLp = new FrameLayout.LayoutParams(
+            mGridLayout.setClickable(true);
+            mGridLayout.setLongClickable(true);
+            mScrollView.addView(mGridLayout, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+            addView(mScrollView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
-            );
-            addView(mGridLayout, gridLp);
+            ));
 
-            // Empty desktop click clears selection; long-press / right-click opens Workspace context menu
-            setOnClickListener(new OnClickListener() {
+            OnClickListener clearClick = new OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     clearSelection();
                 }
-            });
-            setOnLongClickListener(new OnLongClickListener() {
+            };
+            OnLongClickListener emptyLongClick = new OnLongClickListener() {
                 @Override
                 public boolean onLongClick(View v) {
                     v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                     showEmptyDesktopMenu(mLastTouchX, mLastTouchY);
                     return true;
                 }
-            });
-            setOnGenericMotionListener(new OnGenericMotionListener() {
+            };
+            OnGenericMotionListener rightClick = new OnGenericMotionListener() {
                 @Override
                 public boolean onGenericMotion(View v, MotionEvent event) {
                     mLastTouchX = event.getX();
@@ -287,10 +297,40 @@ public final class LauncherCustomDesktopHook {
                     }
                     return false;
                 }
-            });
+            };
+            setOnClickListener(clearClick);
+            setOnLongClickListener(emptyLongClick);
+            setOnGenericMotionListener(rightClick);
+            mGridLayout.setOnClickListener(clearClick);
+            mGridLayout.setOnLongClickListener(emptyLongClick);
+            mGridLayout.setOnGenericMotionListener(rightClick);
 
-            registerDesktopCommandReceiver(context);
             rebuildGrid();
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            registerDesktopCommandReceiver(getContext());
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            unregisterDesktopCommandReceiver(getContext());
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            if (w > 0 && h > 0 && (w != oldw || h != oldh)) {
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        rebuildGrid();
+                    }
+                });
+            }
         }
 
         @Override
@@ -334,11 +374,12 @@ public final class LauncherCustomDesktopHook {
         }
 
         private void registerDesktopCommandReceiver(Context context) {
+            if (mCommandReceiver != null || context == null) return;
             try {
                 Context appCtx = context.getApplicationContext() != null ? context.getApplicationContext() : context;
                 IntentFilter filter = new IntentFilter();
                 filter.addAction(ModConfig.ACTION_DESKTOP_COMMAND);
-                BroadcastReceiver r = new BroadcastReceiver() {
+                mCommandReceiver = new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context ctx, Intent intent) {
                         if (intent == null) return;
@@ -352,11 +393,22 @@ public final class LauncherCustomDesktopHook {
                     }
                 };
                 if (Build.VERSION.SDK_INT >= 33) {
-                    appCtx.registerReceiver(r, filter, 2 /* RECEIVER_EXPORTED */);
+                    appCtx.registerReceiver(mCommandReceiver, filter, 2 /* RECEIVER_EXPORTED */);
                 } else {
-                    appCtx.registerReceiver(r, filter);
+                    appCtx.registerReceiver(mCommandReceiver, filter);
                 }
+            } catch (Throwable ignored) {
+                mCommandReceiver = null;
+            }
+        }
+
+        private void unregisterDesktopCommandReceiver(Context context) {
+            if (mCommandReceiver == null || context == null) return;
+            try {
+                Context appCtx = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+                appCtx.unregisterReceiver(mCommandReceiver);
             } catch (Throwable ignored) {}
+            mCommandReceiver = null;
         }
 
         void rebuildGrid() {
@@ -368,26 +420,31 @@ public final class LauncherCustomDesktopHook {
             int iconScale = Math.max(65, Math.min(150, ModConfig.getInt(ctx, ModConfig.KEY_DESKTOP_ICON_SCALE, 100)));
 
             DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            int totalW = getWidth() > 0 ? getWidth() : dm.widthPixels;
+            int totalH = getHeight() > 0 ? getHeight() : dm.heightPixels;
             int padLeft = dpToPx(ctx, 22);
             int padTop = dpToPx(ctx, 26);
             int padRight = dpToPx(ctx, 22);
-            int padBottom = dpToPx(ctx, 76); // Leave room for Internal DeX Taskbar at bottom
+            int taskbarPx = LauncherDexTaskbarHook.getScaledTaskbarHeightPx(ctx);
+            int padBottom = taskbarPx > 0 ? taskbarPx + dpToPx(ctx, 16) : dpToPx(ctx, 76);
             mGridLayout.setPadding(padLeft, padTop, padRight, padBottom);
+
+            List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
+            int effectiveRows = Math.max(rows, (items.size() + cols - 1) / cols);
 
             mGridLayout.removeAllViews();
             mGridLayout.setColumnCount(cols);
-            mGridLayout.setRowCount(rows);
+            mGridLayout.setRowCount(effectiveRows);
 
-            int availW = Math.max(300, dm.widthPixels - padLeft - padRight);
-            int availH = Math.max(250, dm.heightPixels - padTop - padBottom);
+            int availW = Math.max(300, totalW - padLeft - padRight);
+            int availH = Math.max(250, totalH - padTop - padBottom);
             int cellW = availW / cols;
             int cellH = availH / rows;
             int iconSizePx = Math.round(dpToPx(ctx, 50) * (iconScale / 100.0f));
-            iconSizePx = Math.min(iconSizePx, Math.min(cellW - dpToPx(ctx, 16), cellH - dpToPx(ctx, 28)));
+            iconSizePx = Math.max(dpToPx(ctx, 20),
+                    Math.min(iconSizePx, Math.min(cellW - dpToPx(ctx, 16), cellH - dpToPx(ctx, 28))));
 
-            List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
-            int maxItems = Math.min(items.size(), cols * rows);
-            for (int i = 0; i < maxItems; i++) {
+            for (int i = 0; i < items.size(); i++) {
                 final DesktopShortcutItem item = items.get(i);
                 View cell = createDesktopShortcutCell(ctx, item, cellW, cellH, iconSizePx);
                 mGridLayout.addView(cell);

@@ -4,6 +4,7 @@ import android.app.Application;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.graphics.drawable.GradientDrawable;
 import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
@@ -13,14 +14,17 @@ import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import com.udunus.dexplus.util.HomeGrid;
 import com.udunus.dexplus.util.ModConfig;
 
 import java.io.File;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -33,6 +37,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -114,7 +119,7 @@ public final class LauncherDexTaskbarHook {
             if (createViewCalls != null && createViewCalls[0]++ == 0) {
                 return;
             }
-            if (!modsEnabled || !dexOn() || DEPTH.get()[0] <= 0 || !builtInDisplay(param.thisObject)) {
+            if (!taskbarModsOn() || DEPTH.get()[0] <= 0 || !builtInDisplay(param.thisObject)) {
                 return;
             }
             param.setResult(Boolean.TRUE);
@@ -156,6 +161,8 @@ public final class LauncherDexTaskbarHook {
     private static volatile int scalePercent = SCALE_DEFAULT;
     private static volatile int heightScalePercent = 100;
     private static volatile boolean modsEnabled = true;
+    private static volatile boolean taskbarEnabled = true;
+    private static volatile boolean fixExternalDpi;
     private static volatile boolean hideStatusBar = true;
     private static volatile boolean hideArrows = true;
     private static volatile boolean blockHomeGestures = true;
@@ -168,6 +175,8 @@ public final class LauncherDexTaskbarHook {
     private static volatile Object homeUiComponent;
     private static volatile int targetColumns = 12;
     private static volatile int targetRows = 12;
+    private static volatile int cachedTaskBarHeightResId = -1;
+    private static volatile WeakReference<View> finderButtonRef;
     private static FileObserver iconSizeObserver;
     private static boolean iconSizeWatching;
     private static String appliedOptions;
@@ -200,9 +209,9 @@ public final class LauncherDexTaskbarHook {
     private static boolean loggedListener;
     private static boolean rebindRequested;
     private static int notifPublishTries;
-    private static int batteryFixTries;
-    private static final WeakHashMap<View, TextView> NOTIFICATION_BADGES =
-            new WeakHashMap<View, TextView>();
+    private static final WeakHashMap<View, Integer> BATTERY_FIX_TRIES = new WeakHashMap<View, Integer>();
+    private static final WeakHashMap<View, WeakReference<TextView>> NOTIFICATION_BADGES =
+            new WeakHashMap<View, WeakReference<TextView>>();
     private static boolean loggedAddFailure;
     private static boolean loggedClickHook;
     private static boolean loggedPanels;
@@ -222,6 +231,54 @@ public final class LauncherDexTaskbarHook {
 
     public static boolean isInternalDexActive(Context ctx, ClassLoader cl) {
         return dexOn();
+    }
+
+    private static boolean taskbarModsOn() {
+        return modsEnabled && taskbarEnabled && dexOn();
+    }
+
+    /** Returns the effective DeX taskbar height in pixels for workspace bottom padding. */
+    public static int getScaledTaskbarHeightPx(Context context) {
+        if (context == null) {
+            return 0;
+        }
+        float density = contextDensity(context);
+        if (density < 0.5f) {
+            density = 1.75f;
+        }
+        int basePx = Math.round(56f * density);
+        try {
+            int resId = getTaskBarHeightDexId(context);
+            if (resId != 0) {
+                int dimenPx = context.getResources().getDimensionPixelSize(resId);
+                if (dimenPx > 0) {
+                    basePx = dimenPx;
+                }
+            }
+        } catch (Throwable ignored) {}
+        if (taskbarModsOn()) {
+            return Math.max(1, Math.round(basePx * (heightScalePercent / 100f)));
+        }
+        return basePx;
+    }
+
+    private static int getTaskBarHeightDexId(Context context) {
+        int cached = cachedTaskBarHeightResId;
+        if (cached >= 0) {
+            return cached;
+        }
+        if (context == null) {
+            return 0;
+        }
+        try {
+            int id = context.getResources().getIdentifier(
+                    "task_bar_height_dex", "dimen", context.getPackageName());
+            cachedTaskBarHeightResId = id;
+            return id;
+        } catch (Throwable ignored) {
+            cachedTaskBarHeightResId = 0;
+            return 0;
+        }
     }
 
     public static boolean isBuiltInDisplay(Context ctx) {
@@ -502,7 +559,9 @@ public final class LauncherDexTaskbarHook {
             }
             for (Method method : type.getDeclaredMethods()) {
                 int flags = method.getModifiers();
-                if (Modifier.isAbstract(flags) || Modifier.isNative(flags)) {
+                if (Modifier.isAbstract(flags) || Modifier.isNative(flags)
+                        || method.isSynthetic() || method.isBridge()
+                        || method.getDeclaringClass() == Object.class) {
                     continue;
                 }
                 try {
@@ -618,21 +677,31 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook DENSITY_DIMENSION = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn() || !(param.getResult() instanceof Integer)) {
+            if (!taskbarModsOn() || !(param.getResult() instanceof Integer)) {
                 return;
             }
             int dp = ((Integer) param.getResult()).intValue();
             if (dp <= 0 || param.args == null || param.args.length == 0 || !(param.args[0] instanceof Context)) {
                 return;
             }
+            Context ctx = (Context) param.args[0];
+            if (!isBuiltInDisplay(ctx) && !fixExternalDpi) {
+                return;
+            }
             if (DEPTH.get()[0] <= 0 && !Boolean.TRUE.equals(DEX_UI.get()) && !calledFromDexUi()) {
                 return;
             }
-            float density = contextDensity((Context) param.args[0]);
-            if (density < 1.05f) {
+            float density = contextDensity(ctx);
+            if (density < 0.5f) {
                 return;
             }
-            int px = Math.round(dp * density * (scalePercent / 100f));
+            int resId = (param.args.length > 1 && param.args[1] instanceof Integer)
+                    ? ((Integer) param.args[1]).intValue()
+                    : 0;
+            float effectiveScale = (resId != 0 && resId == getTaskBarHeightDexId(ctx))
+                    ? (heightScalePercent / 100f)
+                    : (scalePercent / 100f);
+            int px = Math.round(dp * density * effectiveScale);
             if (px == dp) {
                 return;
             }
@@ -672,8 +741,9 @@ public final class LauncherDexTaskbarHook {
         ModConfig.reload(context);
         int scale = clampScale(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_ICON_SCALE, SCALE_DEFAULT));
         int heightScale = clamp(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_HEIGHT_SCALE, 100), 65, 135);
-        boolean enabled = ModConfig.isModuleEnabled(context)
-                && ModConfig.getBoolean(context, ModConfig.KEY_DEX_TASKBAR_ENABLED, true);
+        boolean enabled = ModConfig.isModuleEnabled(context);
+        boolean taskbar = ModConfig.getBoolean(context, ModConfig.KEY_DEX_TASKBAR_ENABLED, true);
+        boolean extDpi = ModConfig.getBoolean(context, ModConfig.KEY_FIX_EXTERNAL_DEX_DPI, false);
         boolean forceDex = ModConfig.getBoolean(context, ModConfig.KEY_FORCE_INTERNAL_DEX, false);
         boolean status = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_STATUS_BAR, true);
         boolean arrows = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_PAGE_ARROWS, true);
@@ -689,8 +759,8 @@ public final class LauncherDexTaskbarHook {
         int vertical = clamp(ModConfig.getInt(context, ModConfig.KEY_TOP_MARGIN_PCT, 0), 0, 100);
         int bottom = clamp(ModConfig.getInt(context, ModConfig.KEY_BOTTOM_MARGIN_PCT, 100), 0, 100);
 
-        String signature = scale + "/" + heightScale + "/" + (enabled ? 1 : 0) + "/" + (forceDex ? 1 : 0)
-                + "/" + (status ? 1 : 0) + "/" + (arrows ? 1 : 0)
+        String signature = scale + "/" + heightScale + "/" + (enabled ? 1 : 0)
+                + "/" + (taskbar ? 1 : 0) + "/" + (extDpi ? 1 : 0) + "/" + (forceDex ? 1 : 0)
                 + "/" + margin + "/" + columns + "/" + rows + "/" + vertical + "/" + bottom
                 + "/" + iconScale;
         boolean changed;
@@ -698,6 +768,8 @@ public final class LauncherDexTaskbarHook {
             scalePercent = scale;
             heightScalePercent = heightScale;
             modsEnabled = enabled;
+            taskbarEnabled = taskbar;
+            fixExternalDpi = extDpi;
             forceInternalDex = forceDex;
             hideStatusBar = status;
             hideArrows = arrows;
@@ -725,10 +797,30 @@ public final class LauncherDexTaskbarHook {
         XposedBridge.log(TAG + ": settings " + signature);
         watchIconSize(context);
         applyStatusBar();
+        updateFinderButtonVisibility();
         boolean gridChanged = applyGrid(context);
         if (changed || gridChanged) {
             restartForScale();
         }
+    }
+
+    private static void updateFinderButtonVisibility() {
+        WeakReference<View> ref = finderButtonRef;
+        final View finderView = ref == null ? null : ref.get();
+        if (finderView == null) {
+            return;
+        }
+        final int vis = (!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE;
+        try {
+            finderView.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        finderView.setVisibility(vis);
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable ignored) {}
     }
 
     private static int clamp(int value, int min, int max) {
@@ -750,9 +842,10 @@ public final class LauncherDexTaskbarHook {
         }
         keepTaskbarVisible();
         boolean effects = modsEnabled && dexOn();
+        boolean taskbarEffects = taskbarModsOn();
         writeEffects(context, effects);
-        ensureNotificationAccess(context, effects);
-        boolean want = effects && hideStatusBar;
+        ensureNotificationAccess(context, taskbarEffects);
+        boolean want = taskbarEffects && hideStatusBar;
         writeStatusInset(context, want);
         try {
             String current = Settings.Global.getString(context.getContentResolver(), "policy_control");
@@ -846,7 +939,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void keepTaskbarVisible() {
-        if (taskbarVisFailed || !modsEnabled || !dexOn()) {
+        if (taskbarVisFailed || !taskbarModsOn()) {
             return;
         }
         try {
@@ -1077,7 +1170,8 @@ public final class LauncherDexTaskbarHook {
 
     private static boolean isDedicatedWorkspaceActive() {
         Context ctx = appContext;
-        return ctx != null && ModConfig.getBoolean(ctx, ModConfig.KEY_CUSTOM_DESKTOP_ENABLED, false);
+        return modsEnabled && dexOn() && ctx != null
+                && ModConfig.getBoolean(ctx, ModConfig.KEY_CUSTOM_DESKTOP_ENABLED, false);
     }
 
     private static boolean shouldBlockHomeGestures() {
@@ -1484,7 +1578,9 @@ public final class LauncherDexTaskbarHook {
                     try {
                         Object finderView = field(param.thisObject, "c");
                         if (finderView instanceof View) {
-                            ((View) finderView).setVisibility(showFinderBtn ? View.VISIBLE : View.GONE);
+                            View fv = (View) finderView;
+                            finderButtonRef = new WeakReference<View>(fv);
+                            fv.setVisibility((!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE);
                         }
                     } catch (Throwable ignored) {}
                 }
@@ -1535,7 +1631,7 @@ public final class LauncherDexTaskbarHook {
             XposedHelpers.findAndHookMethod("p4.f", loader, "b", "p4.c", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    if (modsEnabled && dexOn() && statusPanelMode == 1
+                    if (taskbarModsOn() && statusPanelMode == 1
                             && param.args != null && param.args.length > 0 && param.args[0] instanceof Enum) {
                         String panelName = ((Enum<?>) param.args[0]).name();
                         if ("NOTIFICATION".equals(panelName) || "QUICK_SETTINGS".equals(panelName)) {
@@ -1568,7 +1664,7 @@ public final class LauncherDexTaskbarHook {
             if (param.args == null || param.args.length == 0) {
                 return;
             }
-            if (!modsEnabled || !dexOn() || !(param.args[0] instanceof Integer)) {
+            if (!taskbarModsOn() || !(param.args[0] instanceof Integer)) {
                 return;
             }
             // In J6.f._internalCallbackOnClick:
@@ -1629,7 +1725,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook PUBLISH_NOTIFICATIONS = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn()) {
+            if (!taskbarModsOn()) {
                 return;
             }
             publishDexNotifications();
@@ -1732,7 +1828,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook NOTIFICATION_COUNT = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn() || param.args.length == 0) {
+            if (!taskbarModsOn() || param.args.length == 0) {
                 return;
             }
             int count = countNotifications(param.args[0]);
@@ -1780,7 +1876,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void attachNotificationBadge(Object binding) {
-        if (!modsEnabled || !dexOn()) {
+        if (!taskbarModsOn()) {
             return;
         }
         Object button = field(binding, "e");
@@ -1789,34 +1885,32 @@ public final class LauncherDexTaskbarHook {
         }
         ViewGroup group = (ViewGroup) button;
         synchronized (NOTIFICATION_BADGES) {
-            if (NOTIFICATION_BADGES.containsKey(group)) {
+            WeakReference<TextView> existing = NOTIFICATION_BADGES.get(group);
+            if (existing != null && existing.get() != null) {
                 paintNotificationBadges();
                 return;
             }
         }
         try {
-            Context context = (Context) group.getClass().getMethod("getContext").invoke(group);
+            Context context = group.getContext();
             TextView badge = new TextView(context);
             badge.setTextSize(10f);
             badge.setPadding(dp(context, 3), 0, dp(context, 3), 0);
-            badge.getClass().getMethod("setTextColor", int.class).invoke(badge, Integer.valueOf(0xFFFFFFFF));
-            badge.getClass().getMethod("setGravity", int.class).invoke(badge, Integer.valueOf(17));
-            badge.getClass().getMethod("setMinWidth", int.class).invoke(badge, Integer.valueOf(dp(context, 14)));
-            badge.getClass().getMethod("setMinHeight", int.class).invoke(badge, Integer.valueOf(dp(context, 14)));
-            badge.getClass().getMethod("setClickable", boolean.class).invoke(badge, Boolean.FALSE);
-            Object dot = Class.forName("android.graphics.drawable.GradientDrawable").newInstance();
-            dot.getClass().getMethod("setShape", int.class).invoke(dot, Integer.valueOf(1));
-            dot.getClass().getMethod("setColor", int.class).invoke(dot, Integer.valueOf(0xFFE53935));
-            badge.getClass().getMethod("setBackground", Class.forName("android.graphics.drawable.Drawable"))
-                    .invoke(badge, dot);
-            Class<?> params = Class.forName("android.widget.FrameLayout$LayoutParams");
-            Object layout = params.getConstructor(int.class, int.class)
-                    .newInstance(Integer.valueOf(-2), Integer.valueOf(-2));
-            params.getField("gravity").setInt(layout, 8388661);
-            group.getClass().getMethod("addView", View.class, ViewGroup.LayoutParams.class)
-                    .invoke(group, badge, layout);
+            badge.setTextColor(0xFFFFFFFF);
+            badge.setGravity(Gravity.CENTER);
+            badge.setMinWidth(dp(context, 14));
+            badge.setMinHeight(dp(context, 14));
+            badge.setClickable(false);
+            GradientDrawable dot = new GradientDrawable();
+            dot.setShape(GradientDrawable.OVAL);
+            dot.setColor(0xFFE53935);
+            badge.setBackground(dot);
+            FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            layout.gravity = Gravity.TOP | Gravity.END;
+            group.addView(badge, layout);
             synchronized (NOTIFICATION_BADGES) {
-                NOTIFICATION_BADGES.put(group, badge);
+                NOTIFICATION_BADGES.put(group, new WeakReference<TextView>(badge));
             }
             paintNotificationBadges();
         } catch (Throwable error) {
@@ -1828,18 +1922,20 @@ public final class LauncherDexTaskbarHook {
         int count = notificationCount;
         String label = count > 99 ? "99+" : Integer.toString(count);
         synchronized (NOTIFICATION_BADGES) {
-            for (TextView badge : NOTIFICATION_BADGES.values()) {
+            Iterator<WeakReference<TextView>> it = NOTIFICATION_BADGES.values().iterator();
+            while (it.hasNext()) {
+                WeakReference<TextView> ref = it.next();
+                TextView badge = ref == null ? null : ref.get();
                 if (badge == null) {
+                    it.remove();
                     continue;
                 }
                 try {
                     if (count <= 0) {
-                        badge.getClass().getMethod("setVisibility", int.class)
-                                .invoke(badge, Integer.valueOf(8));
+                        badge.setVisibility(View.GONE);
                     } else {
                         badge.setText(label);
-                        badge.getClass().getMethod("setVisibility", int.class)
-                                .invoke(badge, Integer.valueOf(0));
+                        badge.setVisibility(View.VISIBLE);
                     }
                 } catch (Throwable ignored) {}
             }
@@ -1867,7 +1963,7 @@ public final class LauncherDexTaskbarHook {
                 loggedListener = true;
                 XposedBridge.log(TAG + ": notification listener connected");
             }
-            if (modsEnabled && dexOn()) {
+            if (taskbarModsOn()) {
                 publishDexNotifications();
             }
         }
@@ -1943,7 +2039,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook WIDEN_BATTERY = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!modsEnabled || !dexOn()) {
+            if (!taskbarModsOn()) {
                 return;
             }
             widenBatteryDrawable(param.thisObject);
@@ -1979,7 +2075,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void fixBatteryIcon(Object binding) {
-        if (!modsEnabled || !dexOn()) {
+        if (!taskbarModsOn()) {
             return;
         }
         Object meter = field(field(binding, "p"), "f");
@@ -1998,7 +2094,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void applyBatterySize(View meter) {
-        if (!modsEnabled || !dexOn()) {
+        if (!taskbarModsOn()) {
             return;
         }
         try {
@@ -2031,10 +2127,12 @@ public final class LauncherDexTaskbarHook {
                     return;
                 }
                 if (portrait) {
-                    batteryFixTries++;
-                    if (batteryFixTries > 6) {
+                    Integer prevTries = BATTERY_FIX_TRIES.get(icon);
+                    int tries = prevTries == null ? 0 : prevTries.intValue();
+                    if (tries >= 6) {
                         return;
                     }
+                    BATTERY_FIX_TRIES.put(icon, Integer.valueOf(tries + 1));
                 }
                 BATTERY_SIZE.put(icon, Integer.valueOf(key));
             }
@@ -2112,7 +2210,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void startPanelServices(Object manager) {
-        if (panelServicesStarted || !modsEnabled || !dexOn() || manager == null) {
+        if (panelServicesStarted || !taskbarModsOn() || manager == null) {
             return;
         }
         int bound = 0;
@@ -2344,7 +2442,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook WINDOW_TYPE = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (!dexOn() || param.args == null) {
+            if (!taskbarModsOn() || param.args == null) {
                 return;
             }
             for (int i = 0; i < param.args.length; i++) {
@@ -2403,7 +2501,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static boolean growStatusIcons(View area, int windowHeight) {
-        if (!dexOn() || !(area instanceof ViewGroup)) {
+        if (!taskbarModsOn() || !(area instanceof ViewGroup)) {
             return false;
         }
         int dex = dexBarPx(area);
@@ -2570,7 +2668,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook DISPLAY_CONTEXT = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (!dexOn() || param.args == null || param.args.length == 0 || param.args[0] == null) {
+            if (!taskbarModsOn() || param.args == null || param.args.length == 0 || param.args[0] == null) {
                 return;
             }
             int id = displayIdOf(param.args[0]);
@@ -2592,7 +2690,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook LAUNCH_DISPLAY = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (!dexOn() || param.args == null || param.args.length == 0 || !(param.args[0] instanceof Integer)) {
+            if (!taskbarModsOn() || param.args == null || param.args.length == 0 || !(param.args[0] instanceof Integer)) {
                 return;
             }
             int id = ((Integer) param.args[0]).intValue();
@@ -2606,7 +2704,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook ADD_VIEW = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (Boolean.TRUE.equals(IN_RETRY.get()) || !dexOn() || param.args == null) {
+            if (Boolean.TRUE.equals(IN_RETRY.get()) || !taskbarModsOn() || param.args == null) {
                 return;
             }
             for (int i = 0; i < param.args.length; i++) {
@@ -2630,7 +2728,7 @@ public final class LauncherDexTaskbarHook {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
             Throwable error = param.getThrowable();
-            if (!Boolean.TRUE.equals(IN_RETRY.get()) && dexOn() && error == null
+            if (!Boolean.TRUE.equals(IN_RETRY.get()) && taskbarModsOn() && error == null
                     && param.args != null && param.args.length > 1
                     && param.args[0] instanceof View
                     && param.args[1] instanceof ViewGroup.LayoutParams) {
@@ -2642,7 +2740,7 @@ public final class LauncherDexTaskbarHook {
                             + " height " + params.height);
                 }
             }
-            if (Boolean.TRUE.equals(IN_RETRY.get()) || !dexOn() || error == null) {
+            if (Boolean.TRUE.equals(IN_RETRY.get()) || !taskbarModsOn() || error == null) {
                 return;
             }
             if (!loggedAddFailure) {

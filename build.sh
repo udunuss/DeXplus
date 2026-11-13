@@ -5,6 +5,9 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${TMPDIR:-}" ] && [ -d /data/data/com.termux/files/usr/tmp ]; then
+    TMPDIR="/data/data/com.termux/files/usr/tmp"
+fi
 BUILD_DIR="${BUILD_DIR:-${TMPDIR:-/tmp}/dexplus_build}"
 ANDROID_JAR="${ANDROID_JAR:-/data/data/com.termux/files/usr/share/java/android.jar}"
 FINAL_APK="${FINAL_APK:-$PROJECT_DIR/DexPlus.apk}"
@@ -60,6 +63,9 @@ find "$BUILD_DIR/classes/com/udunus/dexplus" -name "*.class" > "$BUILD_DIR/dex_c
 if command -v d8 >/dev/null 2>&1; then
     d8 --lib "$ANDROID_JAR" --min-api 31 --output "$BUILD_DIR/dex" $(cat "$BUILD_DIR/dex_classes.txt")
 else
+    if [ -z "${R8_JAR:-}" ] && [ -f /data/data/com.termux/files/usr/share/java/r8.jar ]; then
+        R8_JAR="/data/data/com.termux/files/usr/share/java/r8.jar"
+    fi
     if [ -z "${R8_JAR:-}" ] || [ ! -f "$R8_JAR" ]; then
         echo "d8 is not on PATH and R8_JAR is not set." >&2
         exit 1

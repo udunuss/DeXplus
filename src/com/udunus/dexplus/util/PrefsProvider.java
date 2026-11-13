@@ -6,11 +6,19 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.Binder;
+import android.os.Process;
 
 import java.util.Map;
 
 public class PrefsProvider extends ContentProvider {
     private static final String[] COLUMNS = new String[]{"key", "type", "value"};
+
+    private static void enforceSameUid() {
+        if (Binder.getCallingUid() != Process.myUid()) {
+            throw new SecurityException("Write access to Dex+ preferences is restricted to module UID");
+        }
+    }
 
     @Override
     public boolean onCreate() {
@@ -51,19 +59,30 @@ public class PrefsProvider extends ContentProvider {
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
+        enforceSameUid();
         return null;
     }
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
-        return 0;
+        enforceSameUid();
+        if (getContext() == null) return 0;
+        ModConfig.getLocalPrefs(getContext()).edit().clear().commit();
+        try {
+            getContext().getContentResolver().notifyChange(ModConfig.PREFS_URI, null);
+        } catch (Throwable ignored) {}
+        return 1;
     }
 
     @Override
     public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        enforceSameUid();
         if (getContext() == null || values == null) return 0;
         SharedPreferences prefs = ModConfig.getLocalPrefs(getContext());
         SharedPreferences.Editor editor = prefs.edit();
+        if ("__RESET__".equals(selection)) {
+            editor.clear();
+        }
         for (String key : values.keySet()) {
             Object val = values.get(key);
             if (val instanceof Boolean) {

@@ -16,6 +16,8 @@ import android.os.Looper;
 import android.os.Process;
 import android.util.Log;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,6 +37,7 @@ public final class ModConfig {
     public static final String ACTION_RESTART_HOST = "com.udunus.dexplus.ACTION_RESTART_HOST";
     public static final String PERMISSION_RESTART_HOST = "com.udunus.dexplus.permission.RESTART_HOST";
     public static final String EXTRA_RESTART_TARGET = "target";
+    public static final String EXTRA_RESET = "__dexplus_reset__";
 
     // General
     public static final String KEY_MODULE_ENABLED = "module_enabled";
@@ -55,8 +58,6 @@ public final class ModConfig {
     public static final String KEY_SIDE_MARGIN_PCT = "side_margin_pct";
     public static final String KEY_TOP_MARGIN_PCT = "top_margin_pct";
     public static final String KEY_BOTTOM_MARGIN_PCT = "bottom_margin_pct";
-    public static final String KEY_EXTRA_HOME_COLS = "extra_home_cols";
-    public static final String KEY_EXTRA_HOME_ROWS = "extra_home_rows";
     public static final String KEY_HOME_ICON_SCALE = "home_icon_scale";
 
     // Optional Custom Desktop Overlay (Launcher)
@@ -66,7 +67,6 @@ public final class ModConfig {
     public static final String KEY_DESKTOP_ICON_SCALE = "desktop_icon_scale";
     public static final String KEY_DESKTOP_DOUBLE_CLICK = "desktop_double_click";
     public static final String KEY_DESKTOP_FREEFORM_LAUNCH = "desktop_freeform_launch";
-    public static final String KEY_DESKTOP_SHOW_CLOCK_WIDGET = "desktop_show_clock_widget";
 
     // Window Decorations & Status Bar (SystemUI)
     public static final String KEY_HIDE_STATUS_BAR = "hide_status_bar";
@@ -76,7 +76,6 @@ public final class ModConfig {
     public static final String KEY_PIN_BUTTON_ENABLED = "pin_button_enabled";
     public static final String KEY_HIDE_APP_CHEVRON = "hide_app_chevron";
     public static final String KEY_HEADER_MENU_CUSTOM_ENABLED = "header_menu_custom_enabled";
-    public static final String KEY_REMOVE_EXIT_WORKSPACE_BTN = "remove_exit_workspace_btn";
     public static final String KEY_ADD_TRANSPARENCY_SLIDER = "add_transparency_slider";
     public static final String KEY_ADD_APP_INFO_BTN = "add_app_info_btn";
     public static final String KEY_ADD_EXTRA_WINDOW_TOOLS = "add_extra_window_tools";
@@ -87,63 +86,58 @@ public final class ModConfig {
     public static final String KEY_FORCE_RESIZABLE_WINDOWS = "force_resizable_windows";
     public static final String KEY_FULLSCREEN_INSIDE = "fullscreen_inside_window";
 
-    private static final Map<String, Object> CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Object> DEFAULTS = createDefaults();
+    private static final Map<String, Object> CACHE = new ConcurrentHashMap<>(DEFAULTS);
     private static final List<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
     private static volatile boolean receiverRegistered = false;
     private static volatile long lastReloadTime = 0L;
     private static XSharedPreferences xPrefs;
 
-    static {
-        loadDefaults();
-    }
-
     private ModConfig() {}
 
-    private static void loadDefaults() {
-        CACHE.put(KEY_MODULE_ENABLED, true);
-        CACHE.put(KEY_FORCE_INTERNAL_DEX, false);
-        CACHE.put(KEY_HIDE_PHYSICAL_KB_TOOLBAR, true);
+    private static Map<String, Object> createDefaults() {
+        Map<String, Object> defaults = new HashMap<>();
+        defaults.put(KEY_MODULE_ENABLED, true);
+        defaults.put(KEY_FORCE_INTERNAL_DEX, false);
+        defaults.put(KEY_HIDE_PHYSICAL_KB_TOOLBAR, true);
 
-        CACHE.put(KEY_DEX_TASKBAR_ENABLED, true);
-        CACHE.put(KEY_FIX_EXTERNAL_DEX_DPI, true);
-        CACHE.put(KEY_TASKBAR_ICON_SCALE, 100);
-        CACHE.put(KEY_TASKBAR_HEIGHT_SCALE, 100);
-        CACHE.put(KEY_STATUS_PANEL_MODE, 0);
-        CACHE.put(KEY_SHOW_DEX_FINDER_BTN, true);
+        defaults.put(KEY_DEX_TASKBAR_ENABLED, true);
+        defaults.put(KEY_FIX_EXTERNAL_DEX_DPI, true);
+        defaults.put(KEY_TASKBAR_ICON_SCALE, 100);
+        defaults.put(KEY_TASKBAR_HEIGHT_SCALE, 100);
+        defaults.put(KEY_STATUS_PANEL_MODE, 0);
+        defaults.put(KEY_SHOW_DEX_FINDER_BTN, true);
 
-        CACHE.put(KEY_HIDE_PAGE_ARROWS, true);
-        CACHE.put(KEY_BLOCK_HOME_GESTURES, true);
-        CACHE.put(KEY_SIDE_MARGIN_PCT, 40);
-        CACHE.put(KEY_TOP_MARGIN_PCT, 0);
-        CACHE.put(KEY_BOTTOM_MARGIN_PCT, 100);
-        CACHE.put(KEY_HOME_ICON_SCALE, 100);
-        CACHE.put(KEY_EXTRA_HOME_COLS, 4);
-        CACHE.put(KEY_EXTRA_HOME_ROWS, 4);
+        defaults.put(KEY_HIDE_PAGE_ARROWS, true);
+        defaults.put(KEY_BLOCK_HOME_GESTURES, true);
+        defaults.put(KEY_SIDE_MARGIN_PCT, 40);
+        defaults.put(KEY_TOP_MARGIN_PCT, 0);
+        defaults.put(KEY_BOTTOM_MARGIN_PCT, 100);
+        defaults.put(KEY_HOME_ICON_SCALE, 100);
 
-        CACHE.put(KEY_CUSTOM_DESKTOP_ENABLED, false);
-        CACHE.put(KEY_DESKTOP_GRID_COLS, 10);
-        CACHE.put(KEY_DESKTOP_GRID_ROWS, 5);
-        CACHE.put(KEY_DESKTOP_ICON_SCALE, 100);
-        CACHE.put(KEY_DESKTOP_DOUBLE_CLICK, false);
-        CACHE.put(KEY_DESKTOP_FREEFORM_LAUNCH, true);
-        CACHE.put(KEY_DESKTOP_SHOW_CLOCK_WIDGET, true);
+        defaults.put(KEY_CUSTOM_DESKTOP_ENABLED, false);
+        defaults.put(KEY_DESKTOP_GRID_COLS, 10);
+        defaults.put(KEY_DESKTOP_GRID_ROWS, 5);
+        defaults.put(KEY_DESKTOP_ICON_SCALE, 100);
+        defaults.put(KEY_DESKTOP_DOUBLE_CLICK, false);
+        defaults.put(KEY_DESKTOP_FREEFORM_LAUNCH, true);
 
-        CACHE.put(KEY_HIDE_STATUS_BAR, true);
-        CACHE.put(KEY_TOP_EDGE_MAXIMIZE, true);
-        CACHE.put(KEY_HIDE_FULLSCREEN_BTN, true);
-        CACHE.put(KEY_HOLD_MAXIMIZE_FULLSCREEN, true);
-        CACHE.put(KEY_PIN_BUTTON_ENABLED, true);
-        CACHE.put(KEY_HIDE_APP_CHEVRON, true);
-        CACHE.put(KEY_HEADER_MENU_CUSTOM_ENABLED, true);
-        CACHE.put(KEY_REMOVE_EXIT_WORKSPACE_BTN, true);
-        CACHE.put(KEY_ADD_TRANSPARENCY_SLIDER, true);
-        CACHE.put(KEY_ADD_APP_INFO_BTN, true);
-        CACHE.put(KEY_ADD_EXTRA_WINDOW_TOOLS, true);
-        CACHE.put(KEY_DEFAULT_WINDOW_OPACITY, 100);
-        CACHE.put(KEY_WINDOW_CORNER_RADIUS, -1);
+        defaults.put(KEY_HIDE_STATUS_BAR, true);
+        defaults.put(KEY_TOP_EDGE_MAXIMIZE, true);
+        defaults.put(KEY_HIDE_FULLSCREEN_BTN, true);
+        defaults.put(KEY_HOLD_MAXIMIZE_FULLSCREEN, true);
+        defaults.put(KEY_PIN_BUTTON_ENABLED, true);
+        defaults.put(KEY_HIDE_APP_CHEVRON, true);
+        defaults.put(KEY_HEADER_MENU_CUSTOM_ENABLED, true);
+        defaults.put(KEY_ADD_TRANSPARENCY_SLIDER, true);
+        defaults.put(KEY_ADD_APP_INFO_BTN, true);
+        defaults.put(KEY_ADD_EXTRA_WINDOW_TOOLS, true);
+        defaults.put(KEY_DEFAULT_WINDOW_OPACITY, 100);
+        defaults.put(KEY_WINDOW_CORNER_RADIUS, -1);
 
-        CACHE.put(KEY_FORCE_RESIZABLE_WINDOWS, true);
-        CACHE.put(KEY_FULLSCREEN_INSIDE, true);
+        defaults.put(KEY_FORCE_RESIZABLE_WINDOWS, true);
+        defaults.put(KEY_FULLSCREEN_INSIDE, true);
+        return Collections.unmodifiableMap(defaults);
     }
 
     public static SharedPreferences getLocalPrefs(Context context) {
@@ -182,12 +176,15 @@ public final class ModConfig {
                         BroadcastReceiver receiver = new BroadcastReceiver() {
                             @Override
                             public void onReceive(Context ctx, Intent intent) {
+                                boolean changed;
                                 if (intent != null && intent.getExtras() != null) {
-                                    applyBundleToCache(intent.getExtras());
+                                    changed = applyBundleToCache(intent.getExtras());
                                 } else {
-                                    reloadFromProvider(ctx);
+                                    changed = reloadFromProviderWithDiff(ctx);
                                 }
-                                notifyListeners();
+                                if (changed) {
+                                    notifyListeners();
+                                }
                             }
                         };
                         if (Build.VERSION.SDK_INT >= 33) {
@@ -202,8 +199,9 @@ public final class ModConfig {
                                     new ContentObserver(new Handler(Looper.getMainLooper())) {
                                         @Override
                                         public void onChange(boolean selfChange) {
-                                            reloadFromProvider(appCtx);
-                                            notifyListeners();
+                                            if (reloadFromProviderWithDiff(appCtx)) {
+                                                notifyListeners();
+                                            }
                                         }
                                     });
                         } catch (Throwable ignored) {}
@@ -215,11 +213,14 @@ public final class ModConfig {
             }
             reload(context);
         } else {
-            long now = System.currentTimeMillis();
-            if (now - lastReloadTime > 4000L) {
-                lastReloadTime = now;
-                reload(context);
-            }
+            reloadIfStale(context, 4000L);
+        }
+    }
+
+    public static void reloadIfStale(Context context, long maxAgeMs) {
+        long now = System.currentTimeMillis();
+        if (now - lastReloadTime > maxAgeMs) {
+            reload(context);
         }
     }
 
@@ -234,12 +235,40 @@ public final class ModConfig {
         }
     }
 
+    private static boolean replaceCacheWithDefaultsAnd(Map<String, Object> overrides) {
+        Map<String, Object> next = new HashMap<>(DEFAULTS);
+        if (overrides != null) {
+            for (Map.Entry<String, Object> e : overrides.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    next.put(e.getKey(), e.getValue());
+                }
+            }
+        }
+        if (CACHE.equals(next)) {
+            return false;
+        }
+        CACHE.putAll(next);
+        CACHE.keySet().retainAll(next.keySet());
+        return true;
+    }
+
     private static boolean reloadFromProvider(Context context) {
+        return reloadFromProviderInternal(context, new boolean[1]);
+    }
+
+    private static boolean reloadFromProviderWithDiff(Context context) {
+        boolean[] changed = new boolean[1];
+        reloadFromProviderInternal(context, changed);
+        return changed[0];
+    }
+
+    private static boolean reloadFromProviderInternal(Context context, boolean[] outChanged) {
         if (context == null) return false;
         Cursor cursor = null;
         try {
             cursor = context.getContentResolver().query(PREFS_URI, null, null, null, null);
             if (cursor != null) {
+                Map<String, Object> loaded = new HashMap<>();
                 while (cursor.moveToNext()) {
                     String key = cursor.getString(0);
                     String type = cursor.getString(1);
@@ -247,19 +276,21 @@ public final class ModConfig {
                     if (key == null || type == null || val == null) continue;
                     switch (type) {
                         case "boolean":
-                            CACHE.put(key, Boolean.parseBoolean(val));
+                            loaded.put(key, Boolean.parseBoolean(val));
                             break;
                         case "int":
-                            CACHE.put(key, Integer.parseInt(val));
+                            loaded.put(key, Integer.parseInt(val));
                             break;
                         case "float":
-                            CACHE.put(key, Float.parseFloat(val));
+                            loaded.put(key, Float.parseFloat(val));
                             break;
                         default:
-                            CACHE.put(key, val);
+                            loaded.put(key, val);
                             break;
                     }
                 }
+                outChanged[0] = replaceCacheWithDefaultsAnd(loaded);
+                lastReloadTime = System.currentTimeMillis();
                 return true;
             }
         } catch (Throwable ignored) {
@@ -273,32 +304,77 @@ public final class ModConfig {
 
     private static void reloadFromXSharedPrefs() {
         try {
+            boolean readable = false;
             if (xPrefs == null) {
                 xPrefs = new XSharedPreferences(MODULE_PACKAGE, PREFS_NAME);
-                xPrefs.makeWorldReadable();
-            } else if (xPrefs.hasFileChanged()) {
-                xPrefs.reload();
+                readable = xPrefs.makeWorldReadable();
+            } else {
+                if (xPrefs.hasFileChanged()) {
+                    xPrefs.reload();
+                }
+                readable = true;
             }
+            try {
+                Object file = xPrefs.getClass().getMethod("getFile").invoke(xPrefs);
+                if (file instanceof java.io.File) {
+                    readable = ((java.io.File) file).canRead();
+                }
+            } catch (Throwable ignored) {}
             Map<String, ?> all = xPrefs.getAll();
-            if (all != null && !all.isEmpty()) {
-                for (Map.Entry<String, ?> entry : all.entrySet()) {
-                    if (entry.getKey() != null && entry.getValue() != null) {
-                        CACHE.put(entry.getKey(), entry.getValue());
+            if (readable || (all != null && !all.isEmpty())) {
+                Map<String, Object> loaded = new HashMap<>();
+                if (all != null) {
+                    for (Map.Entry<String, ?> entry : all.entrySet()) {
+                        if (entry.getKey() != null && entry.getValue() != null) {
+                            loaded.put(entry.getKey(), entry.getValue());
+                        }
                     }
                 }
+                replaceCacheWithDefaultsAnd(loaded);
             }
         } catch (Throwable ignored) {}
     }
 
-    private static void applyBundleToCache(Bundle bundle) {
-        if (bundle == null) return;
+    private static boolean applyBundleToCache(Bundle bundle) {
+        if (bundle == null) return false;
+        lastReloadTime = System.currentTimeMillis();
+        if (bundle.getBoolean(EXTRA_RESET, false)) {
+            Map<String, Object> overrides = new HashMap<>();
+            for (String key : bundle.keySet()) {
+                if (EXTRA_RESET.equals(key)) continue;
+                Object v = bundle.get(key);
+                if (v != null) {
+                    overrides.put(key, v);
+                }
+            }
+            return replaceCacheWithDefaultsAnd(overrides);
+        }
+        boolean changed = false;
         for (String key : bundle.keySet()) {
             Object v = bundle.get(key);
-            if (v != null) {
+            if (v != null && !v.equals(CACHE.get(key))) {
                 CACHE.put(key, v);
+                changed = true;
             }
         }
-        lastReloadTime = System.currentTimeMillis();
+        return changed;
+    }
+
+    public static void resetToDefaults(Context context, SharedPreferences prefs) {
+        if (context == null || prefs == null) return;
+        try {
+            prefs.edit().clear().commit();
+            replaceCacheWithDefaultsAnd(null);
+            try {
+                context.getContentResolver().delete(PREFS_URI, null, null);
+            } catch (Throwable ignored) {}
+            Intent intent = new Intent(ACTION_PREFS_CHANGED);
+            intent.putExtra(EXTRA_RESET, true);
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            context.sendBroadcast(intent);
+        } catch (Throwable t) {
+            Log.w(TAG, "resetToDefaults error: " + t);
+        }
     }
 
     public static void broadcastChanges(Context context, SharedPreferences prefs) {
@@ -333,9 +409,6 @@ public final class ModConfig {
             }
             try {
                 context.getContentResolver().update(PREFS_URI, cv, null, null);
-            } catch (Throwable ignored) {}
-            try {
-                context.getContentResolver().notifyChange(PREFS_URI, null);
             } catch (Throwable ignored) {}
             intent.putExtras(extras);
             intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);

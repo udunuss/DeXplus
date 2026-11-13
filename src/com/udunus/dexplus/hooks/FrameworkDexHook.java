@@ -24,11 +24,8 @@ public final class FrameworkDexHook {
                 XposedBridge.hookAllMethods(activityRecordClass, "isResizeable", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (Boolean.FALSE.equals(param.getResult())) {
-                            if (ModConfig.getBoolean(null, ModConfig.KEY_MODULE_ENABLED, true)
-                                    && ModConfig.getBoolean(null, ModConfig.KEY_FORCE_RESIZABLE_WINDOWS, true)) {
-                                param.setResult(true);
-                            }
+                        if (Boolean.FALSE.equals(param.getResult()) && forceResizableEnabled()) {
+                            param.setResult(true);
                         }
                     }
                 });
@@ -36,11 +33,8 @@ public final class FrameworkDexHook {
                 XposedBridge.hookAllMethods(activityRecordClass, "supportsFreeform", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (Boolean.FALSE.equals(param.getResult())) {
-                            if (ModConfig.getBoolean(null, ModConfig.KEY_MODULE_ENABLED, true)
-                                    && ModConfig.getBoolean(null, ModConfig.KEY_FORCE_RESIZABLE_WINDOWS, true)) {
-                                param.setResult(true);
-                            }
+                        if (Boolean.FALSE.equals(param.getResult()) && forceResizableEnabled()) {
+                            param.setResult(true);
                         }
                     }
                 });
@@ -52,11 +46,8 @@ public final class FrameworkDexHook {
                 XposedBridge.hookAllMethods(taskClass, "isResizeable", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (Boolean.FALSE.equals(param.getResult())) {
-                            if (ModConfig.getBoolean(null, ModConfig.KEY_MODULE_ENABLED, true)
-                                    && ModConfig.getBoolean(null, ModConfig.KEY_FORCE_RESIZABLE_WINDOWS, true)) {
-                                param.setResult(true);
-                            }
+                        if (Boolean.FALSE.equals(param.getResult()) && forceResizableEnabled()) {
+                            param.setResult(true);
                         }
                     }
                 });
@@ -64,11 +55,8 @@ public final class FrameworkDexHook {
                 XposedBridge.hookAllMethods(taskClass, "supportsFreeformInDisplayArea", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (Boolean.FALSE.equals(param.getResult())) {
-                            if (ModConfig.getBoolean(null, ModConfig.KEY_MODULE_ENABLED, true)
-                                    && ModConfig.getBoolean(null, ModConfig.KEY_FORCE_RESIZABLE_WINDOWS, true)) {
-                                param.setResult(true);
-                            }
+                        if (Boolean.FALSE.equals(param.getResult()) && forceResizableEnabled()) {
+                            param.setResult(true);
                         }
                     }
                 });
@@ -145,9 +133,17 @@ public final class FrameworkDexHook {
         }
     }
 
+    private static boolean forceResizableEnabled() {
+        try {
+            ModConfig.reloadIfStale(null, 2000L);
+        } catch (Throwable ignored) {}
+        return ModConfig.isModuleEnabled(null)
+                && ModConfig.getBoolean(null, ModConfig.KEY_FORCE_RESIZABLE_WINDOWS, true);
+    }
+
     private static boolean insideWindow() {
         try {
-            ModConfig.reload(null);
+            ModConfig.reloadIfStale(null, 2000L);
         } catch (Throwable ignored) {}
         return ModConfig.isModuleEnabled(null)
                 && ModConfig.getBoolean(null, ModConfig.KEY_FULLSCREEN_INSIDE, true);

@@ -1,12 +1,16 @@
 
 # Dex+
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/udunuss/dexplus?label=Release)](https://github.com/udunuss/dexplus/releases/latest)
+[![Platform](https://img.shields.io/badge/One%20UI-8.5%20%2F%20Android%2016-1f6feb.svg)](https://github.com/udunuss/dexplus)
+
 > [!CAUTION]
 > Untested with Samsung DeX on external monitors. Using this module may break external DeX functionality.
 
 **Dex+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, improving the home-screen layout for desktop use, and adding extra window controls.
 
-Developed against MinsOS 1.2.3 - One UI 8.5 on a Galaxy Tab S7+. Other One UI versions can differ.
+Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
 <img width="1514" height="1119" alt="general" src="https://github.com/user-attachments/assets/30daf46a-2851-4a49-be9f-5df1cd3836aa" />
 
@@ -18,21 +22,21 @@ https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
 ### General
 
-- **Enable Dex+.** Master switch for the desktop taskbar, workspace, status bar, and window controls.
+- **Enable Dex+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, and window controls. Disabling it restores window alphas, corner radii, and caption controls cleanly.
 - **Keep Desktop Mode Always Active.** Keeps the desktop taskbar and window features on the built-in display even when DeX mode is turned off.
 - **Hide Physical Keyboard Toolbar.** Hides the floating keyboard toolbar when a hardware keyboard is connected.
 - **Restart Home Screen.** Reloads One UI Home.
 - **Restart System UI.** Reloads System UI so title-bar changes start fresh.
-- **Restore Defaults.** Puts the settings back to their original values.
+- **Restore Defaults.** Prompts for confirmation and resets all preferences back to their default values across hooked processes.
 
 ### Taskbar & Panels
 
-- **Enable Desktop Taskbar.** Shows the desktop taskbar with running apps, a notification count, quick settings, calendar, and audio controls.
+- **Enable Desktop Taskbar.** Shows the desktop taskbar with running apps, a notification count, quick settings, calendar, and audio controls. Can be toggled independently without turning off window controls or home-screen options.
 - **Use Standard Notification & Quick Settings Shade.** Taskbar notification and quick settings buttons open the full system shade instead of the compact popups.
-- **Show Search Button on Taskbar.** Shows the Finder search button in the taskbar status area.
-- **Apply Scaling to External Displays.** Also applies the taskbar icon and density scale on connected monitors.
+- **Show Search Button on Taskbar.** Shows or hides the Finder search button in the taskbar status area live.
+- **Apply Scaling to External Displays.** Also applies the taskbar icon and density scale on connected external monitors.
 - **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140%.
-- **Taskbar Height.** Height of the desktop taskbar. Default 100%. Range 75% to 135%.
+- **Taskbar Height.** Height of the desktop taskbar (scales `task_bar_height_dex` and adjusts workspace bottom clearance). Default 100%. Range 75% to 135%.
 
 ### Home Screen
 
@@ -45,13 +49,13 @@ https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
 ### Dedicated Workspace
 
-- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a full-screen shortcut grid. Right-click or long-press to add or remove shortcuts.
+- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a scrollable, full-screen shortcut grid that adapts on rotation and window resize. Right-click or long-press to add or remove shortcuts.
 - **Open Shortcuts in Resizable Windows.** Opens workspace shortcuts in freeform desktop windows.
 - **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it.
 - **Workspace Columns.** Shortcut columns. Default 10. Range 6 to 16.
 - **Workspace Rows.** Shortcut rows. Default 5. Range 4 to 10.
 - **Shortcut Icon Size.** Size of workspace icons and labels. Default 100%. Range 70% to 140%.
-- **Reset Shortcuts.** Restores the default set of workspace shortcuts.
+- **Reset Shortcuts.** Prompts for confirmation and restores the default set of workspace shortcuts.
 
 ### Window Controls
 
@@ -139,11 +143,19 @@ chmod +x build.sh
 
 The APK is written to `DexPlus-<version>.apk` when `FINAL_APK` is set, and to `DexPlus.apk` otherwise.
 
-On Termux, if `d8` is not installed, set `R8_JAR` to an R8 jar. If `/system/framework/framework-res.apk` exists, the script uses it when linking resources.
+On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh` also checks `$PREFIX/share/java/r8.jar` and uses `$PREFIX/tmp` automatically when available. If `/system/framework/framework-res.apk` exists, the script uses it when linking resources.
 
 ## Version
 
-`1.2.35-dex` (versionCode 10235).
+`1.2.36-dex` (`versionCode` 10236)
+
+### Highlights in `1.2.36-dex`
+
+- **Build & Termux verification:** Automatic Termux `$PREFIX/share/java/r8.jar` and `$PREFIX/tmp` fallback in `build.sh`.
+- **Launcher & Taskbar:** Independent **Enable Desktop Taskbar** gating, `task_bar_height_dex` height scaling, external display DPI toggle (`KEY_FIX_EXTERNAL_DEX_DPI`), live Finder button and non-restarting status/arrow toggles, and `WeakReference` notification badges.
+- **SystemUI Window Controls:** Dynamic resource-name lookup (with fallback IDs), live **Drag Window to Top Edge to Maximize** and **Long-Press Maximize** gating, clean restoration of default corner radius & window opacity on reset/disable, and `PIN_TAG`/`BACK_TAG` touch-pass handling.
+- **Framework & Honeyboard:** Live config staleness reload in `system_server` for **Allow All Apps in Resizable Windows**, and `ContentObserver`-cached effects state + module toggle check in Honeyboard.
+- **Dedicated Workspace & Settings UI:** Scrollable shortcut grid sized to view bounds, orientation rebuilds, compact top-tab layout in narrow (`< 600dp`) windows, confirmation prompts on destructive resets, and UID-restricted `PrefsProvider` writes.
 
 ## License
 
