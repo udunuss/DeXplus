@@ -38,25 +38,13 @@ https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 - **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140%.
 - **Taskbar Height.** Height of the desktop taskbar (scales `task_bar_height_dex` and adjusts workspace bottom clearance). Default 100%. Range 75% to 135%.
 
-### Home Screen
 
-- **Hide Page Navigation Arrows.** Hides the left and right page arrows.
-- **Lock Home Screen Gestures.** Blocks the upward app-drawer swipe and the two-finger pinch edit gesture while desktop mode is on.
-- **Icon size.** Home screen icon size. The grid fits as many icons as it can at that size. Default 100%. Range 60% to 160%.
-- **Side Margins.** Space on the left and right of the home screen. Default 40%.
-- **Top Margin.** Space above the home screen grid. Default 0%.
-- **Bottom Margin.** Extra space between the icons and the taskbar. 0% sits the grid on the taskbar. Default 100%.
+### Desktop Workspace
 
-### Dedicated Workspace
-
-- **Enable Dedicated Workspace.** Replaces the normal home pages and widgets with a scrollable, full-screen shortcut grid that adapts on rotation and window resize. Supports general right-click menus anywhere on empty space or icons, searchable app picker, direct mouse/touch drag-and-drop reordering, dragging apps directly from the App Drawer onto the desktop, keyboard navigation (`Enter`, `Delete`, `Menu`), Wallpaper & style shortcut, and automatic redirection of "Add to Home" and browser/app pinned shortcuts.
 - **Open Shortcuts in Resizable Windows.** Opens workspace shortcuts in freeform desktop windows.
 - **Free Grid Placement.** Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left.
 - **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it.
-- **Workspace Columns.** Shortcut columns. Default 10. Range 6 to 16.
-- **Workspace Rows.** Shortcut rows. Default 5. Range 4 to 10.
 - **Shortcut Icon Size.** Size of workspace icons and labels. Default 100%. Range 70% to 140%.
-- **Reset Shortcuts.** Prompts for confirmation and restores the default set of workspace shortcuts.
 
 ### Window Controls
 
