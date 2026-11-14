@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Dex+ LSPosed module.
+# Builds the DeX+ LSPosed module.
 # Signing uses KEYSTORE, KEY_ALIAS, KEYSTORE_PASSWORD, and KEY_PASSWORD.
 # Those values are not stored in this repository.
 set -euo pipefail

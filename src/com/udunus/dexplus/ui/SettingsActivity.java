@@ -208,7 +208,7 @@ public class SettingsActivity extends Activity {
         header.setPadding(dp(4), 0, dp(4), dp(10));
 
         TextView appTitle = new TextView(this);
-        appTitle.setText("Dex+");
+        appTitle.setText("DeX+");
         appTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f);
         appTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         appTitle.setTextColor(mTextPrimary);
@@ -290,7 +290,7 @@ public class SettingsActivity extends Activity {
         brandBox.setPadding(dp(10), 0, dp(10), dp(16));
 
         TextView appTitle = new TextView(this);
-        appTitle.setText("Dex+");
+        appTitle.setText("DeX+");
         appTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f);
         appTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         appTitle.setTextColor(mTextPrimary);
@@ -440,7 +440,7 @@ public class SettingsActivity extends Activity {
         addSectionLabel(page, "DESKTOP MODE");
         LinearLayout mainCard = createCard();
         addSwitchRow(mainCard,
-                "Enable Dex+",
+                "Enable DeX+",
                 "Master switch for all desktop taskbar, workspace, status bar, and window controls.",
                 ModConfig.KEY_MODULE_ENABLED, true, true);
         addSwitchRow(mainCard,
@@ -512,7 +512,7 @@ public class SettingsActivity extends Activity {
             public void onClick(View v) {
                 new AlertDialog.Builder(SettingsActivity.this)
                         .setTitle("Restore Default Settings")
-                        .setMessage("Reset all Dex+ preferences to their default values?")
+                        .setMessage("Reset all DeX+ preferences to their default values?")
                         .setPositiveButton("Restore", new DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(DialogInterface dialog, int which) {

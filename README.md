@@ -1,5 +1,5 @@
 
-# Dex+
+# DeX+
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/udunuss/dexplus?label=Release)](https://github.com/udunuss/dexplus/releases/latest)
@@ -8,7 +8,7 @@
 > [!CAUTION]
 > Untested with Samsung DeX on external monitors. Using this module may break external DeX functionality.
 
-**Dex+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, providing a Windows-style desktop with optional file-backed folders and shortcuts, and adding extra window controls.
+**DeX+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, providing a Windows-style desktop with optional file-backed folders and shortcuts, and adding extra window controls.
 
 Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
@@ -34,7 +34,7 @@ https://github.com/user-attachments/assets/a4313a31-2bb7-4126-aabb-d0ad80c24a40
 
 ### General
 
-- **Enable Dex+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, and window controls. Disabling it restores window alphas, corner radii, and caption controls cleanly.
+- **Enable DeX+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, and window controls. Disabling it restores window alphas, corner radii, and caption controls cleanly.
 - **Keep Desktop Mode Always Active.** Keeps the desktop taskbar and window features on the built-in display even when DeX mode is turned off.
 - **Hide Physical Keyboard Toolbar.** Hides the floating keyboard toolbar when a hardware keyboard is connected.
 - **Restart Home Screen.** Reloads One UI Home.
@@ -107,14 +107,14 @@ The clock and date popup on the taskbar is not given the same density treatment 
 
 1. Open the [latest release](https://github.com/udunuss/dexplus/releases/latest) and download the `DexPlus-*.apk` file.
 2. Install the APK.
-3. In LSPosed, enable Dex+ for:
+3. In LSPosed, enable DeX+ for:
    - System framework (`android`)
    - System UI (`com.android.systemui`)
    - One UI Home (`com.sec.android.app.launcher`)
    - Samsung Keyboard (`com.samsung.android.honeyboard`), if you use it
 4. Reboot.
 
-Do not enable this module together with the external DeX module. If that module is already loaded, Dex+ skips its hooks.
+Do not enable this module together with the external DeX module. If that module is already loaded, DeX+ skips its hooks.
 
 After the first reboot, the in-app restart buttons reload One UI Home and System UI when you change settings. They do not need root.
 
@@ -150,4 +150,4 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## License
 
-Dex+ is released under the [MIT License](LICENSE).
+DeX+ is released under the [MIT License](LICENSE).

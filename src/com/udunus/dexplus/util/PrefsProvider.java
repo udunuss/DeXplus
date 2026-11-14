@@ -21,7 +21,7 @@ public class PrefsProvider extends ContentProvider {
 
     private static void enforceSameUid() {
         if (Binder.getCallingUid() != Process.myUid()) {
-            throw new SecurityException("Write access to Dex+ preferences is restricted to module UID");
+            throw new SecurityException("Write access to DeX+ preferences is restricted to module UID");
         }
     }
 

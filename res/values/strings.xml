@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Dex+</string>
+    <string name="app_name">DeX+</string>
     <string name="module_description">An LSPosed module for improving DeX. Brings classic DeX features to the newer One UI desktop mode.</string>
 </resources>

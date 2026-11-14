@@ -2599,7 +2599,7 @@ public final class LauncherCustomDesktopHook {
             popup.getMenu().add(0, 7, ord++, "Select all");
             popup.getMenu().add(0, 3, ord++, "Refresh desktop");
             popup.getMenu().add(0, 5, ord++, "Wallpaper & style");
-            popup.getMenu().add(0, 6, ord++, "Dex+ Settings");
+            popup.getMenu().add(0, 6, ord++, "DeX+ Settings");
             popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
                 @Override
                 public boolean onMenuItemClick(android.view.MenuItem item) {
@@ -2743,7 +2743,7 @@ public final class LauncherCustomDesktopHook {
             StringBuilder sb = new StringBuilder();
             sb.append("Name: ").append(item.label).append('\n');
             sb.append("File: ").append(f.getName()).append('\n');
-            sb.append("Type: ").append(item.isDirectory ? "Folder" : (item.isFileEntry ? item.mimeType : "Dex+ Shortcut (.dexsc)")).append('\n');
+            sb.append("Type: ").append(item.isDirectory ? "Folder" : (item.isFileEntry ? item.mimeType : "DeX+ Shortcut (.dexsc)")).append('\n');
             sb.append("Path: ").append(f.getAbsolutePath()).append('\n');
             if (!item.isDirectory) {
                 sb.append("Size: ").append(formatByteSize(f.length())).append('\n');
@@ -4891,7 +4891,7 @@ public final class LauncherCustomDesktopHook {
             } catch (Throwable ignored) {}
             context.startActivity(intent, opts.toBundle());
         } catch (Throwable t) {
-            Toast.makeText(context, "Dex+ Settings not found", Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, "DeX+ Settings not found", Toast.LENGTH_SHORT).show();
         }
     }
 
