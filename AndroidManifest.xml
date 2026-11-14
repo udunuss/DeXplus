@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.udunus.dexplus"
-    android:versionCode="10245"
-    android:versionName="1.2.45-dex">
+    android:versionCode="10246"
+    android:versionName="1.2.46-dex">
 
     <uses-sdk
         android:minSdkVersion="31"
