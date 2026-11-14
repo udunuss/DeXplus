@@ -27,6 +27,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Point;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
@@ -45,6 +46,7 @@ import android.os.UserHandle;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.Base64;
@@ -61,6 +63,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -807,9 +812,13 @@ public final class LauncherCustomDesktopHook {
         private final Runnable mDebouncedFileRefresh = new Runnable() {
             @Override
             public void run() {
-                if (isAttachedToWindow()) {
-                    rebuildGrid();
+                if (!isAttachedToWindow()) return;
+                if (mInlineRenameEditor != null) {
+                    mUiHandler.removeCallbacks(this);
+                    mUiHandler.postDelayed(this, 300L);
+                    return;
                 }
+                rebuildGrid();
             }
         };
         private long mLastClickTime = 0L;
@@ -833,6 +842,12 @@ public final class LauncherCustomDesktopHook {
         private int mMarqueeToolType = MotionEvent.TOOL_TYPE_UNKNOWN;
         private float mMarqueeDownX = 0f;
         private float mMarqueeDownY = 0f;
+        private EditText mInlineRenameEditor = null;
+        private DesktopShortcutItem mInlineRenameItem = null;
+        private TextView mInlineRenameTargetLabel = null;
+        private String mInlineRenameInitialName = null;
+        private boolean mFinishingInlineRename = false;
+        private int mSavedDescendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS;
 
         private static final class DragSession {
             final DesktopShortcutItem item;
@@ -1169,6 +1184,7 @@ public final class LauncherCustomDesktopHook {
 
         @Override
         protected void onDetachedFromWindow() {
+            finishInlineRename(false);
             unregisterDesktopCommandReceiver(getContext());
             stopFileObserver();
             mUiHandler.removeCallbacks(mDebouncedFileRefresh);
@@ -1253,6 +1269,18 @@ public final class LauncherCustomDesktopHook {
 
         @Override
         public boolean dispatchTouchEvent(MotionEvent ev) {
+            if (ev != null && mInlineRenameEditor != null && mInlineRenameEditor.getParent() == this) {
+                Rect editorRect = new Rect();
+                mInlineRenameEditor.getHitRect(editorRect);
+                if (editorRect.contains((int) ev.getX(), (int) ev.getY())) {
+                    mLastTouchX = ev.getX();
+                    mLastTouchY = ev.getY();
+                    return super.dispatchTouchEvent(ev);
+                }
+                if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    finishInlineRename(true);
+                }
+            }
             if (ev != null) {
                 mLastTouchX = ev.getX();
                 mLastTouchY = ev.getY();
@@ -1413,6 +1441,9 @@ public final class LauncherCustomDesktopHook {
 
         @Override
         public boolean onKeyDown(int keyCode, KeyEvent event) {
+            if (mInlineRenameEditor != null) {
+                return super.onKeyDown(keyCode, event);
+            }
             Context ctx = getContext();
             boolean ctrl = mCtrlDown || (event != null && event.isCtrlPressed());
             if (ctrl && keyCode == KeyEvent.KEYCODE_A) {
@@ -1444,6 +1475,13 @@ public final class LauncherCustomDesktopHook {
                 List<DesktopShortcutItem> selected = getSelectedItems();
                 if (!selected.isEmpty()) {
                     confirmAndDeleteOrRemoveSelection(ctx, selected);
+                    return true;
+                }
+            }
+            if (keyCode == KeyEvent.KEYCODE_F2 && mInlineRenameEditor == null) {
+                List<DesktopShortcutItem> selected = getSelectedItems();
+                if (selected.size() == 1 && selected.get(0).backingFile != null) {
+                    startInlineRename(ctx, selected.get(0));
                     return true;
                 }
             }
@@ -1577,6 +1615,9 @@ public final class LauncherCustomDesktopHook {
         void rebuildGrid() {
             Context ctx = getContext();
             if (ctx == null) return;
+            if (mInlineRenameEditor != null && !mFinishingInlineRename) {
+                finishInlineRename(false);
+            }
 
             syncFileObserver(ctx);
 
@@ -1779,6 +1820,7 @@ public final class LauncherCustomDesktopHook {
             }
 
             TextView labelView = new TextView(context);
+            labelView.setId(android.R.id.text1);
             labelView.setText(item.label);
             labelView.setTextColor(Color.rgb(249, 250, 251));
             labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
@@ -2515,7 +2557,7 @@ public final class LauncherCustomDesktopHook {
                 popup.getMenu().add(0, idAppInfo, order++, "App info");
             }
             if (item.backingFile != null) {
-                popup.getMenu().add(0, idRename, order++, "Rename...");
+                popup.getMenu().add(0, idRename, order++, "Rename");
             }
             popup.getMenu().add(0, idRemove, order++,
                     item.backingFile != null ? (item.isFileEntry ? "Delete" : "Delete shortcut") : "Remove from desktop");
@@ -2543,7 +2585,12 @@ public final class LauncherCustomDesktopHook {
                         openAppInfo(context, item.getPackageName());
                         return true;
                     } else if (id == idRename && item.backingFile != null) {
-                        showRenameFileItemDialog(context, item);
+                        postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                startInlineRename(context, item);
+                            }
+                        }, 40L);
                         return true;
                     } else if (id == idRemove) {
                         confirmAndDeleteOrRemoveSelection(context, Collections.singletonList(item));
@@ -2697,31 +2744,288 @@ public final class LauncherCustomDesktopHook {
                     .show();
         }
 
-        private void showRenameFileItemDialog(final Context context, final DesktopShortcutItem item) {
-            if (item.backingFile == null) return;
-            final boolean isDexsc = item.backingFile.getName().toLowerCase(Locale.ROOT).endsWith(DEXSC_EXT);
-            final EditText input = new EditText(context);
-            input.setSingleLine(true);
-            String initialName = isDexsc ? item.label : item.backingFile.getName();
-            input.setText(initialName);
-            input.selectAll();
+        private View findCellByKey(String storageKey) {
+            if (storageKey == null) return null;
+            for (View cell : mCellViews) {
+                if (cell.getTag() instanceof DesktopShortcutItem
+                        && storageKey.equals(((DesktopShortcutItem) cell.getTag()).storageKey)) {
+                    return cell;
+                }
+            }
+            return null;
+        }
 
-            LinearLayout wrap = new LinearLayout(context);
-            wrap.setOrientation(LinearLayout.VERTICAL);
-            wrap.setPadding(dpToPx(context, 20), dpToPx(context, 12), dpToPx(context, 20), dpToPx(context, 4));
-            wrap.addView(input);
-
-            new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle("Rename")
-                    .setView(wrap)
-                    .setPositiveButton("Rename", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            String newName = input.getText().toString().trim();
-                            if (TextUtils.isEmpty(newName) || newName.contains("/") || newName.startsWith(".")) {
-                                Toast.makeText(context, "Invalid name", Toast.LENGTH_SHORT).show();
+        private void adjustInlineEditorForIme(Context context, EditText editor) {
+            if (editor == null || !editor.isAttachedToWindow()) return;
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    WindowInsets wi = getRootWindowInsets();
+                    if (wi != null) {
+                        Class<?> typeClass = Class.forName("android.view.WindowInsets$Type");
+                        int imeMask = (Integer) typeClass.getMethod("ime").invoke(null);
+                        Object imeInsets = XposedHelpers.callMethod(wi, "getInsets", imeMask);
+                        int imeBottom = XposedHelpers.getIntField(imeInsets, "bottom");
+                        if (imeBottom > 0) {
+                            int[] winLoc = new int[2];
+                            getLocationInWindow(winLoc);
+                            View root = getRootView();
+                            int rootH = (root != null && root.getHeight() > 0) ? root.getHeight() : getHeight();
+                            int visibleBottomInDesktop = (rootH - imeBottom) - winLoc[1] - dpToPx(context, 8);
+                            int editorBottom = editor.getTop() + editor.getHeight();
+                            if (visibleBottomInDesktop > 0 && editorBottom > visibleBottomInDesktop) {
+                                editor.setTranslationY(visibleBottomInDesktop - editorBottom);
                                 return;
                             }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+            editor.setTranslationY(0f);
+        }
+
+        private void startInlineRename(final Context context, final DesktopShortcutItem item) {
+            if (context == null || item == null || item.backingFile == null) return;
+            if (mInlineRenameEditor != null) {
+                finishInlineRename(true);
+            }
+            View cell = findCellByKey(item.storageKey);
+            if (cell == null) return;
+            TextView labelView = cell.findViewById(android.R.id.text1);
+            if (labelView == null) return;
+
+            final boolean isDexsc = item.backingFile.getName().toLowerCase(Locale.ROOT).endsWith(DEXSC_EXT);
+            final String initialName = isDexsc ? item.label : item.backingFile.getName();
+            int selEnd = initialName.length();
+            if (!isDexsc && !item.isDirectory) {
+                int dot = initialName.lastIndexOf('.');
+                if (dot > 0) {
+                    selEnd = dot;
+                }
+            }
+
+            Rect cellRect = new Rect(0, 0, cell.getWidth(), cell.getHeight());
+            Rect labelRect = new Rect(0, 0, labelView.getWidth(), labelView.getHeight());
+            try {
+                offsetDescendantRectToMyCoords(cell, cellRect);
+                offsetDescendantRectToMyCoords(labelView, labelRect);
+            } catch (Throwable ignored) {
+                return;
+            }
+
+            final int marginSide = dpToPx(context, 6);
+            int maxAllowedW = Math.max(dpToPx(context, 80), getWidth() - (marginSide * 2));
+            int editorW = Math.min(maxAllowedW, Math.max(cellRect.width() + dpToPx(context, 20), dpToPx(context, 132)));
+            int left = cellRect.centerX() - (editorW / 2);
+            left = Math.max(marginSide, Math.min(left, Math.max(marginSide, getWidth() - editorW - marginSide)));
+            int top = Math.max(dpToPx(context, 4), labelRect.top - dpToPx(context, 4));
+
+            final EditText editor = new EditText(context) {
+                @Override
+                public boolean onKeyPreIme(int keyCode, KeyEvent event) {
+                    if (keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                        if (event != null && event.getAction() == KeyEvent.ACTION_UP) {
+                            finishInlineRename(false);
+                        }
+                        return true;
+                    }
+                    return super.onKeyPreIme(keyCode, event);
+                }
+            };
+
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(Color.argb(238, 22, 26, 35));
+            bg.setCornerRadius(dpToPx(context, 6));
+            bg.setStroke(Math.max(2, dpToPx(context, 1.5f)), Color.rgb(96, 165, 250));
+            editor.setBackground(bg);
+            editor.setTextColor(Color.WHITE);
+            editor.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
+            editor.setGravity(Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+            editor.setPadding(dpToPx(context, 6), dpToPx(context, 4), dpToPx(context, 6), dpToPx(context, 4));
+            editor.setMinHeight(Math.max(labelView.getHeight() + dpToPx(context, 8), dpToPx(context, 26)));
+            editor.setMaxLines(3);
+            editor.setHorizontallyScrolling(false);
+            editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            editor.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+            editor.setHighlightColor(Color.argb(120, 59, 130, 246));
+            editor.setFocusable(true);
+            editor.setFocusableInTouchMode(true);
+            editor.setText(initialName);
+            if (selEnd > 0) {
+                editor.setSelection(0, Math.min(selEnd, editor.length()));
+            }
+
+            final boolean[] gainedFocus = new boolean[]{false};
+            final long startedAt = SystemClock.uptimeMillis();
+            editor.setOnFocusChangeListener(new OnFocusChangeListener() {
+                @Override
+                public void onFocusChange(View v, boolean hasFocus) {
+                    if (hasFocus) {
+                        gainedFocus[0] = true;
+                    } else if (gainedFocus[0] && (SystemClock.uptimeMillis() - startedAt) > 120L) {
+                        post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (mInlineRenameEditor == editor) {
+                                    finishInlineRename(true);
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
+            editor.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+                @Override
+                public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                    if (actionId == EditorInfo.IME_ACTION_DONE
+                            || actionId == EditorInfo.IME_ACTION_NEXT
+                            || actionId == EditorInfo.IME_NULL) {
+                        finishInlineRename(true);
+                        return true;
+                    }
+                    return false;
+                }
+            });
+
+            editor.setOnKeyListener(new OnKeyListener() {
+                @Override
+                public boolean onKey(View v, int keyCode, KeyEvent event) {
+                    if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                        if (event != null && event.getAction() == KeyEvent.ACTION_UP) {
+                            finishInlineRename(true);
+                        }
+                        return true;
+                    }
+                    if (keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                        if (event != null && event.getAction() == KeyEvent.ACTION_UP) {
+                            finishInlineRename(false);
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+            });
+
+            editor.addTextChangedListener(new TextWatcher() {
+                private boolean updating = false;
+                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+                @Override
+                public void afterTextChanged(Editable s) {
+                    if (updating || s == null) return;
+                    String str = s.toString();
+                    if (str.indexOf('\n') >= 0 || str.indexOf('\r') >= 0) {
+                        updating = true;
+                        String cleaned = str.replace("\r", "").replace("\n", "");
+                        s.replace(0, s.length(), cleaned);
+                        updating = false;
+                        post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (mInlineRenameEditor == editor) {
+                                    finishInlineRename(true);
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                editor.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                    @Override
+                    public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                        post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (mInlineRenameEditor == editor) {
+                                    adjustInlineEditorForIme(context, editor);
+                                }
+                            }
+                        });
+                        return v.onApplyWindowInsets(insets);
+                    }
+                });
+            }
+            editor.addOnLayoutChangeListener(new OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    if (mInlineRenameEditor == editor) {
+                        adjustInlineEditorForIme(context, editor);
+                    }
+                }
+            });
+
+            mSavedDescendantFocusability = getDescendantFocusability();
+            setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+
+            mInlineRenameEditor = editor;
+            mInlineRenameItem = item;
+            mInlineRenameTargetLabel = labelView;
+            mInlineRenameInitialName = initialName;
+            labelView.setVisibility(View.INVISIBLE);
+
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(editorW, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.leftMargin = left;
+            lp.topMargin = top;
+            addView(editor, lp);
+            editor.bringToFront();
+
+            editor.requestFocus();
+            post(new Runnable() {
+                @Override
+                public void run() {
+                    if (mInlineRenameEditor != editor || !editor.isAttachedToWindow()) return;
+                    editor.requestFocus();
+                    try {
+                        InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (imm != null) {
+                            imm.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+        }
+
+        private void finishInlineRename(boolean commit) {
+            if (mFinishingInlineRename || mInlineRenameEditor == null) return;
+            mFinishingInlineRename = true;
+            final Context context = getContext();
+            final EditText editor = mInlineRenameEditor;
+            final DesktopShortcutItem item = mInlineRenameItem;
+            final TextView targetLabel = mInlineRenameTargetLabel;
+            final String initialName = mInlineRenameInitialName;
+            String rawText = editor.getText() != null ? editor.getText().toString() : "";
+
+            mInlineRenameEditor = null;
+            mInlineRenameItem = null;
+            mInlineRenameTargetLabel = null;
+            mInlineRenameInitialName = null;
+
+            try {
+                InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null && editor.getWindowToken() != null) {
+                    imm.hideSoftInputFromWindow(editor.getWindowToken(), 0);
+                }
+            } catch (Throwable ignored) {}
+
+            if (targetLabel != null) {
+                targetLabel.setVisibility(View.VISIBLE);
+            }
+            if (editor.getParent() == this) {
+                removeView(editor);
+            }
+            setDescendantFocusability(mSavedDescendantFocusability);
+            requestFocus();
+
+            try {
+                if (commit && item != null && item.backingFile != null) {
+                    String newName = rawText.replace("\r", "").replace("\n", " ").trim();
+                    if (!TextUtils.isEmpty(newName) && !newName.equals(initialName)) {
+                        if (newName.contains("/") || newName.startsWith(".")) {
+                            Toast.makeText(context, "Invalid name", Toast.LENGTH_SHORT).show();
+                        } else {
                             String newKey = renameFileBasedItem(context, item, newName);
                             if (newKey != null) {
                                 mSelectedKeys.remove(item.storageKey);
@@ -2732,9 +3036,11 @@ public final class LauncherCustomDesktopHook {
                                 Toast.makeText(context, "Rename failed (name may already exist)", Toast.LENGTH_SHORT).show();
                             }
                         }
-                    })
-                    .setNegativeButton("Cancel", null)
-                    .show();
+                    }
+                }
+            } finally {
+                mFinishingInlineRename = false;
+            }
         }
 
         private void showFilePropertiesDialog(Context context, DesktopShortcutItem item) {
