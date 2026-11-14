@@ -978,6 +978,9 @@ public final class LauncherCustomDesktopHook {
             setLongClickable(true);
             setFocusable(true);
             setFocusableInTouchMode(true);
+            if (Build.VERSION.SDK_INT >= 26) {
+                setDefaultFocusHighlightEnabled(false);
+            }
             if (Build.VERSION.SDK_INT >= 23) {
                 setContextClickable(true);
             }
@@ -987,6 +990,9 @@ public final class LauncherCustomDesktopHook {
             mScrollView.setVerticalScrollBarEnabled(false);
             mScrollView.setClickable(true);
             mScrollView.setLongClickable(true);
+            if (Build.VERSION.SDK_INT >= 26) {
+                mScrollView.setDefaultFocusHighlightEnabled(false);
+            }
             if (Build.VERSION.SDK_INT >= 23) {
                 mScrollView.setContextClickable(true);
             }
@@ -995,6 +1001,9 @@ public final class LauncherCustomDesktopHook {
             mGridLayout.setOrientation(GridLayout.VERTICAL);
             mGridLayout.setClickable(true);
             mGridLayout.setLongClickable(true);
+            if (Build.VERSION.SDK_INT >= 26) {
+                mGridLayout.setDefaultFocusHighlightEnabled(false);
+            }
             if (Build.VERSION.SDK_INT >= 23) {
                 mGridLayout.setContextClickable(true);
             }
@@ -1728,6 +1737,9 @@ public final class LauncherCustomDesktopHook {
             slot.setLayoutParams(lp);
             slot.setClickable(true);
             slot.setLongClickable(true);
+            if (Build.VERSION.SDK_INT >= 26) {
+                slot.setDefaultFocusHighlightEnabled(false);
+            }
             if (Build.VERSION.SDK_INT >= 23) {
                 slot.setContextClickable(true);
             }
@@ -1805,6 +1817,9 @@ public final class LauncherCustomDesktopHook {
             cell.setPadding(pad, dpToPx(context, 8), pad, pad);
             if (Build.VERSION.SDK_INT >= 23) {
                 cell.setContextClickable(true);
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                cell.setDefaultFocusHighlightEnabled(false);
             }
             cell.setLayoutParams(lp);
 
@@ -2880,6 +2895,9 @@ public final class LauncherCustomDesktopHook {
                     if (actionId == EditorInfo.IME_ACTION_DONE
                             || actionId == EditorInfo.IME_ACTION_NEXT
                             || actionId == EditorInfo.IME_NULL) {
+                        if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+                            return true;
+                        }
                         finishInlineRename(true);
                         return true;
                     }
