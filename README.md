@@ -28,8 +28,6 @@ https://github.com/user-attachments/assets/af07b760-d09a-4b91-8765-b06dca87f027
 
 https://github.com/user-attachments/assets/a4313a31-2bb7-4126-aabb-d0ad80c24a40
 
-<img width="1514" height="1119" alt="general" src="https://github.com/user-attachments/assets/30daf46a-2851-4a49-be9f-5df1cd3836aa" />
-
 
 
 ## Options
