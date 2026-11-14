@@ -140,7 +140,14 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## Version
 
-`1.2.46-dex` (`versionCode` 10246)
+`1.2.47-dex` (`versionCode` 10247)
+
+### Highlights in `1.2.47-dex`
+
+- **Desktop Inline Rename & Creation Flow:** Replaced the rename dialog with direct inline text editing under desktop icons, fixed the white focus highlight overlay on Enter, and started inline rename with only the filename stem selected when creating new folders or files.
+- **Desktop "New" Submenu & Custom File Types:** Grouped item creation under a **"New"** submenu with a right-aligned chevron arrow and tighter `8dp` menu corners, plus a **"New" Menu File Types** editor in **DeX+ Settings → Desktop** to add, remove, or reset custom file templates.
+- **Drag & Drop with Folders and Samsung My Files:** Added dropping desktop files into desktop folders and two-way moving of files/folders between Desktop and Samsung My Files.
+- **Bluetooth Mouse Software Keyboard Fix:** Kept the software keyboard available when only a Bluetooth/wireless mouse with a keyboard HID descriptor is connected without a real physical keyboard.
 
 ### Highlights in `1.2.45-dex` – `1.2.46-dex`
 
