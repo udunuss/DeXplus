@@ -1,14 +1,17 @@
 package com.udunus.dexplus.hooks;
 
+import android.app.Activity;
 import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.app.AndroidAppHelper;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ComponentName;
 import android.content.ContentUris;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -37,13 +40,16 @@ import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
@@ -54,6 +60,7 @@ import android.util.DisplayMetrics;
 import android.util.LruCache;
 import android.util.TypedValue;
 import android.webkit.MimeTypeMap;
+import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
@@ -87,7 +94,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
@@ -2110,6 +2119,23 @@ public final class LauncherCustomDesktopHook {
                     return true;
                 }
 
+                if (targetItem != null && targetItem.isDirectory && targetItem.backingFile != null
+                        && !session.draggedKeys.contains(targetItem.storageKey)) {
+                    List<DesktopShortcutItem> movable = collectMovableFileItemsForFolder(
+                            session.draggedKeys, targetItem.backingFile);
+                    if (!movable.isEmpty()) {
+                        int moved = moveDesktopItemsIntoFolder(ctx, movable, targetItem.backingFile);
+                        if (moved > 0) {
+                            clearSelection();
+                            rebuildGrid();
+                            mUiHandler.removeCallbacks(mDebouncedFileRefresh);
+                        } else {
+                            Toast.makeText(ctx, "Could not move into folder", Toast.LENGTH_SHORT).show();
+                        }
+                        return true;
+                    }
+                }
+
                 boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
                 if (session.draggedKeys.size() > 1) {
                     if (freePlacement) {
@@ -2260,9 +2286,15 @@ public final class LauncherCustomDesktopHook {
                 }
             }
 
-            // Fallback: inspect ClipData intents (OverlayApps / add_icon_other_window / external drags)
+            // Fallback: inspect ClipData intents (OverlayApps / add_icon_other_window) and file/folder URIs (My Files, etc.)
+            // External file/folder drop (e.g. Samsung My Files, Gallery, Chrome, file managers) FIRST
+            // so file URIs aren't hijacked by helper shortcut intents bundled in the same ClipData.
             ClipData clip = event.getClipData();
             if (clip != null) {
+                if (handleExternalFileDrop(ctx, event, targetCol, targetRow, targetItem, freePlacement)) {
+                    return true;
+                }
+
                 for (int i = 0; i < clip.getItemCount(); i++) {
                     ClipData.Item ci = clip.getItemAt(i);
                     if (ci == null) continue;
@@ -2292,6 +2324,264 @@ public final class LauncherCustomDesktopHook {
                 }
             }
             return false;
+        }
+
+        private List<DesktopShortcutItem> collectMovableFileItemsForFolder(List<String> keys, File destDir) {
+            List<DesktopShortcutItem> out = new ArrayList<>();
+            if (keys == null || destDir == null || !destDir.isDirectory()) return out;
+            for (String k : keys) {
+                View cell = findCellByKey(k);
+                if (cell == null || !(cell.getTag() instanceof DesktopShortcutItem)) continue;
+                DesktopShortcutItem di = (DesktopShortcutItem) cell.getTag();
+                if (!di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+                if (di.backingFile.equals(destDir)) continue;
+                if (di.isDirectory && isSameOrSubDirectory(di.backingFile, destDir)) continue;
+                out.add(di);
+            }
+            return out;
+        }
+
+        private int moveDesktopItemsIntoFolder(Context ctx, List<DesktopShortcutItem> items, File destDir) {
+            if (ctx == null || items == null || items.isEmpty() || destDir == null || !destDir.isDirectory()) {
+                return 0;
+            }
+            int moved = 0;
+            List<String> movedKeys = new ArrayList<>();
+            List<String> scanPaths = new ArrayList<>();
+            for (DesktopShortcutItem item : items) {
+                File src = item.backingFile;
+                if (src == null || !src.exists()) continue;
+                File dest = uniqueChildFile(destDir, src.getName());
+                if (moveFileOrDirectory(src, dest)) {
+                    moved++;
+                    movedKeys.add(item.storageKey);
+                    scanPaths.add(src.getAbsolutePath());
+                    scanPaths.add(dest.getAbsolutePath());
+                }
+            }
+            if (!movedKeys.isEmpty()) {
+                removeDesktopKeysWithoutDeletingFiles(ctx, movedKeys);
+                notifyMediaScannerPaths(ctx, scanPaths);
+            }
+            return moved;
+        }
+
+        private boolean handleExternalFileDrop(
+                Context ctx,
+                DragEvent event,
+                int targetCol,
+                int targetRow,
+                DesktopShortcutItem targetItem,
+                boolean freePlacement) {
+            ClipData clip = event != null ? event.getClipData() : null;
+            if (clip == null) return false;
+
+            boolean hasFilePayload = false;
+            List<Uri> uris = new ArrayList<>();
+            List<File> textFiles = new ArrayList<>();
+
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                ClipData.Item ci = clip.getItemAt(i);
+                if (ci == null) continue;
+                Uri u = ci.getUri();
+                if (u != null) {
+                    uris.add(u);
+                    hasFilePayload = true;
+                    continue;
+                }
+                Intent intent = ci.getIntent();
+                if (intent != null) {
+                    Uri intentData = intent.getData();
+                    if (intentData != null) {
+                        uris.add(intentData);
+                        hasFilePayload = true;
+                    }
+                    try {
+                        Uri stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                        if (stream != null) {
+                            uris.add(stream);
+                            hasFilePayload = true;
+                        }
+                    } catch (Throwable ignored) {}
+                    try {
+                        ArrayList<Uri> streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                        if (streams != null) {
+                            for (Uri s : streams) {
+                                if (s != null) {
+                                    uris.add(s);
+                                    hasFilePayload = true;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {}
+                    continue;
+                }
+                File tf = resolveLocalFileFromText(ci.getText());
+                if (tf != null) {
+                    textFiles.add(tf);
+                    hasFilePayload = true;
+                }
+            }
+
+            // Fallback: check ClipDescription PersistableBundle extras for Samsung My Files paths
+            if (uris.isEmpty() && textFiles.isEmpty() && clip.getDescription() != null) {
+                PersistableBundle extras = clip.getDescription().getExtras();
+                if (extras != null) {
+                    for (String k : new String[]{"path", "src_file_path", "FILE_PATH", "file_path", "secdndfilepath"}) {
+                        try {
+                            String p = extras.getString(k);
+                            File f = resolveLocalFileFromText(p);
+                            if (f != null) {
+                                textFiles.add(f);
+                                hasFilePayload = true;
+                            }
+                            String[] arr = extras.getStringArray(k);
+                            if (arr != null) {
+                                for (String ap : arr) {
+                                    File af = resolveLocalFileFromText(ap);
+                                    if (af != null) {
+                                        textFiles.add(af);
+                                        hasFilePayload = true;
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+
+            if (!hasFilePayload) return false;
+
+            boolean droppingIntoFolder = (targetItem != null && targetItem.isDirectory && targetItem.backingFile != null);
+            if (!droppingIntoFolder && !isFileBasedDesktop(ctx)) {
+                Toast.makeText(ctx, "Enable File-Based Desktop in DeX+ Settings to drop files", Toast.LENGTH_SHORT).show();
+                return false;
+            }
+
+            File destDir = droppingIntoFolder ? targetItem.backingFile : getDesktopDirectory(ctx);
+            if (destDir == null || !destDir.isDirectory()) return false;
+
+            DragAndDropPermissions dndPerms = null;
+            if (Build.VERSION.SDK_INT >= 24) {
+                try {
+                    Activity act = unwrapActivity(ctx);
+                    if (act != null) {
+                        dndPerms = act.requestDragAndDropPermissions(event);
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            int handledCount = 0;
+            List<String> newKeys = new ArrayList<>();
+            List<String> scanPaths = new ArrayList<>();
+            try {
+                for (Uri uri : uris) {
+                    File srcFile = resolveLocalFileFromUri(ctx, uri);
+                    if (srcFile != null && srcFile.exists()) {
+                        if (srcFile.getParentFile() != null && srcFile.getParentFile().equals(destDir)) {
+                            continue;
+                        }
+                        if (srcFile.isDirectory() && isSameOrSubDirectory(srcFile, destDir)) {
+                            continue;
+                        }
+                        File destFile = uniqueChildFile(destDir, srcFile.getName());
+                        if (moveFileOrDirectory(srcFile, destFile)) {
+                            handledCount++;
+                            scanPaths.add(srcFile.getAbsolutePath());
+                            scanPaths.add(destFile.getAbsolutePath());
+                            if (!droppingIntoFolder) {
+                                newKeys.add(FILE_ENTRY_PREFIX + destFile.getName());
+                            }
+                        }
+                    } else {
+                        File copied = copyUriToDestination(ctx, uri, destDir);
+                        if (copied != null) {
+                            handledCount++;
+                            scanPaths.add(copied.getAbsolutePath());
+                            if (!droppingIntoFolder) {
+                                newKeys.add(FILE_ENTRY_PREFIX + copied.getName());
+                            }
+                        }
+                    }
+                }
+
+                for (File srcFile : textFiles) {
+                    if (srcFile == null || !srcFile.exists()) continue;
+                    if (srcFile.getParentFile() != null && srcFile.getParentFile().equals(destDir)) continue;
+                    if (srcFile.isDirectory() && isSameOrSubDirectory(srcFile, destDir)) continue;
+                    File destFile = uniqueChildFile(destDir, srcFile.getName());
+                    if (moveFileOrDirectory(srcFile, destFile)) {
+                        handledCount++;
+                        scanPaths.add(srcFile.getAbsolutePath());
+                        scanPaths.add(destFile.getAbsolutePath());
+                        if (!droppingIntoFolder) {
+                            newKeys.add(FILE_ENTRY_PREFIX + destFile.getName());
+                        }
+                    }
+                }
+            } finally {
+                if (dndPerms != null && Build.VERSION.SDK_INT >= 24) {
+                    try {
+                        dndPerms.release();
+                    } catch (Throwable ignored) {}
+                }
+            }
+
+            if (handledCount <= 0) {
+                return false;
+            }
+
+            if (!scanPaths.isEmpty()) {
+                notifyMediaScannerPaths(ctx, scanPaths);
+            }
+
+            if (!droppingIntoFolder && !newKeys.isEmpty()) {
+                List<String> order = readSavedKeyOrder(ctx);
+                for (String k : newKeys) {
+                    if (!order.contains(k)) {
+                        order.add(k);
+                    }
+                }
+                saveShortcutList(ctx, new LinkedHashSet<>(order));
+
+                if (freePlacement) {
+                    Map<String, int[]> positions = loadShortcutPositions(ctx);
+                    Set<Long> occupied = new HashSet<>();
+                    for (View cv : mCellViews) {
+                        int[] pos = mSlotMap.get(cv);
+                        if (pos != null) {
+                            occupied.add((((long) pos[1]) << 32) | (pos[0] & 0xFFFFFFFFL));
+                        }
+                    }
+                    int cols = Math.max(1, mCurrentCols);
+                    int colCursor = Math.max(0, Math.min(cols - 1, targetCol));
+                    int rowCursor = Math.max(0, targetRow);
+                    for (String k : newKeys) {
+                        while (occupied.contains((((long) rowCursor) << 32) | (colCursor & 0xFFFFFFFFL))) {
+                            colCursor++;
+                            if (colCursor >= cols) {
+                                colCursor = 0;
+                                rowCursor++;
+                            }
+                        }
+                        positions.put(k, new int[]{colCursor, rowCursor});
+                        occupied.add((((long) rowCursor) << 32) | (colCursor & 0xFFFFFFFFL));
+                    }
+                    saveShortcutPositions(ctx, positions);
+                } else if (targetItem != null) {
+                    moveMultipleShortcuts(ctx, newKeys, targetItem.storageKey);
+                }
+            }
+
+            rebuildGrid();
+            if (!droppingIntoFolder && !newKeys.isEmpty()) {
+                mSelectedKeys.clear();
+                mSelectedKeys.addAll(newKeys);
+                mSelectionAnchorKey = newKeys.get(0);
+                refreshSelectionVisuals();
+            }
+            mUiHandler.removeCallbacks(mDebouncedFileRefresh);
+            return true;
         }
 
         private void setDropHighlight(View target) {
@@ -4188,16 +4478,255 @@ public final class LauncherCustomDesktopHook {
         Object local = event.getLocalState();
         if (local instanceof ClassicDexDesktopView.DragSession) return true;
         if (extractHoneyDragInfo(event) != null) return true;
+        int action = event.getAction();
+        if (action == DragEvent.ACTION_DRAG_STARTED) {
+            try {
+                if (event.getClipDescription() != null) return true;
+                if (event.getClipData() != null && event.getClipData().getItemCount() > 0) return true;
+            } catch (Throwable ignored) {}
+            return false;
+        }
+        if (action == DragEvent.ACTION_DROP) {
+            try {
+                if (event.getClipData() != null && event.getClipData().getItemCount() > 0) return true;
+                if (event.getClipDescription() != null) return true;
+            } catch (Throwable ignored) {}
+            return false;
+        }
+        return true;
+    }
+
+    private static Activity unwrapActivity(Context ctx) {
+        while (ctx instanceof ContextWrapper) {
+            if (ctx instanceof Activity) return (Activity) ctx;
+            ctx = ((ContextWrapper) ctx).getBaseContext();
+        }
+        return ctx instanceof Activity ? (Activity) ctx : null;
+    }
+
+    private static boolean isSameOrSubDirectory(File ancestor, File target) {
+        if (ancestor == null || target == null) return false;
         try {
-            if (event.getClipData() != null && event.getClipData().getItemCount() > 0) {
-                return true;
+            String ancPath = ancestor.getCanonicalPath();
+            String tgtPath = target.getCanonicalPath();
+            if (ancPath.equals(tgtPath)) return true;
+            String prefix = ancPath.endsWith("/") ? ancPath : (ancPath + "/");
+            return tgtPath.startsWith(prefix);
+        } catch (Throwable ignored) {
+            String ancPath = ancestor.getAbsolutePath();
+            String tgtPath = target.getAbsolutePath();
+            if (ancPath.equals(tgtPath)) return true;
+            String prefix = ancPath.endsWith("/") ? ancPath : (ancPath + "/");
+            return tgtPath.startsWith(prefix);
+        }
+    }
+
+    private static boolean moveFileOrDirectory(File src, File dest) {
+        if (src == null || dest == null || !src.exists()) return false;
+        if (src.equals(dest)) return true;
+        File destParent = dest.getParentFile();
+        if (destParent != null && !destParent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            destParent.mkdirs();
+        }
+        if (src.renameTo(dest)) {
+            return true;
+        }
+        if (copyFileOrDirectory(src, dest)) {
+            deleteRecursive(src);
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean copyFileOrDirectory(File src, File dest) {
+        if (src == null || dest == null || !src.exists()) return false;
+        if (src.isDirectory()) {
+            if (!dest.exists() && !dest.mkdirs()) return false;
+            File[] children = src.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    if (!copyFileOrDirectory(child, new File(dest, child.getName()))) {
+                        return false;
+                    }
+                }
             }
-            if (event.getClipDescription() != null) {
-                return event.getClipDescription().hasMimeType("text/vnd.android.intent")
-                        || event.getClipDescription().hasMimeType("text/plain");
+            return true;
+        }
+        try (InputStream in = new FileInputStream(src);
+             OutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                out.write(buf, 0, n);
+            }
+            return true;
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": copyFileOrDirectory error: " + t);
+            return false;
+        }
+    }
+
+    private static File resolveLocalFileFromText(CharSequence text) {
+        if (text == null) return null;
+        String s = text.toString().trim();
+        if (s.isEmpty()) return null;
+        if (s.startsWith("file://")) {
+            try {
+                String p = Uri.parse(s).getPath();
+                if (!TextUtils.isEmpty(p)) {
+                    File f = new File(p);
+                    if (f.exists()) return f;
+                }
+            } catch (Throwable ignored) {}
+        }
+        if (s.startsWith("/storage/") || s.startsWith("/sdcard/")) {
+            File f = new File(s);
+            if (f.exists()) return f;
+        }
+        return null;
+    }
+
+    private static File resolveLocalFileFromUri(Context ctx, Uri uri) {
+        if (uri == null) return null;
+        String scheme = uri.getScheme();
+        if ("file".equalsIgnoreCase(scheme)) {
+            String p = uri.getPath();
+            if (!TextUtils.isEmpty(p)) {
+                File f = new File(p);
+                if (f.exists()) return f;
+            }
+            return null;
+        }
+        if (!"content".equalsIgnoreCase(scheme)) {
+            return null;
+        }
+        String authority = uri.getAuthority();
+        String path = uri.getPath();
+
+        // Samsung My Files FileProvider (res/8K.xml: "external" -> "/", "device_storage" -> "../externalStorage")
+        if ("com.sec.android.app.myfiles.FileProvider".equals(authority) && !TextUtils.isEmpty(path)) {
+            if (path.startsWith("/external/")) {
+                File f = new File("/" + path.substring("/external/".length()));
+                if (f.exists()) return f;
+            } else if (path.startsWith("/device_storage/")) {
+                File extParent = Environment.getExternalStorageDirectory().getParentFile();
+                if (extParent != null) {
+                    File f = new File(extParent, path.substring("/device_storage/".length()));
+                    if (f.exists()) return f;
+                }
+            }
+        }
+
+        // Android ExternalStorageDocumentsProvider ("primary:rel/path" or "<vol>:rel/path")
+        if ("com.android.externalstorage.documents".equals(authority) && !TextUtils.isEmpty(path)) {
+            String docId = null;
+            int docIdx = path.indexOf("/document/");
+            if (docIdx >= 0) {
+                docId = path.substring(docIdx + "/document/".length());
+            } else {
+                int treeIdx = path.indexOf("/tree/");
+                if (treeIdx >= 0) {
+                    docId = path.substring(treeIdx + "/tree/".length());
+                }
+            }
+            if (!TextUtils.isEmpty(docId)) {
+                int colon = docId.indexOf(':');
+                if (colon > 0) {
+                    String vol = docId.substring(0, colon);
+                    String rel = docId.substring(colon + 1);
+                    File base = "primary".equalsIgnoreCase(vol)
+                            ? Environment.getExternalStorageDirectory()
+                            : new File("/storage/" + vol);
+                    File f = TextUtils.isEmpty(rel) ? base : new File(base, rel);
+                    if (f.exists()) return f;
+                }
+            }
+        }
+
+        // Fallback: query _data column from MediaStore / content providers
+        if (ctx != null) {
+            try (Cursor c = ctx.getContentResolver().query(uri, new String[]{"_data"}, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    String dataPath = c.getString(0);
+                    if (!TextUtils.isEmpty(dataPath)) {
+                        File f = new File(dataPath);
+                        if (f.exists()) return f;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private static File copyUriToDestination(Context ctx, Uri uri, File destDir) {
+        if (ctx == null || uri == null || destDir == null || !destDir.isDirectory()) return null;
+        String displayName = null;
+        try (Cursor c = ctx.getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                displayName = c.getString(0);
             }
         } catch (Throwable ignored) {}
-        return false;
+        if (TextUtils.isEmpty(displayName)) {
+            displayName = uri.getLastPathSegment();
+        }
+        if (TextUtils.isEmpty(displayName)) {
+            displayName = "Dropped File";
+        }
+        String cleanName = displayName.replace('/', '_').trim();
+        while (cleanName.startsWith(".")) {
+            cleanName = cleanName.substring(1).trim();
+        }
+        if (TextUtils.isEmpty(cleanName)) cleanName = "Dropped File";
+
+        File dest = uniqueChildFile(destDir, cleanName);
+        try (InputStream in = ctx.getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            try (OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) >= 0) {
+                    out.write(buf, 0, n);
+                }
+            }
+            return dest;
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": copyUriToDestination error for " + uri + ": " + t);
+            //noinspection ResultOfMethodCallIgnored
+            if (dest.exists()) dest.delete();
+            return null;
+        }
+    }
+
+    private static void removeDesktopKeysWithoutDeletingFiles(Context context, List<String> storageKeys) {
+        if (context == null || storageKeys == null || storageKeys.isEmpty()) return;
+        List<String> keys = readSavedKeyOrder(context);
+        boolean orderChanged = keys.removeAll(storageKeys);
+        if (orderChanged) {
+            saveShortcutList(context, new LinkedHashSet<>(keys));
+        }
+        Map<String, int[]> positions = loadShortcutPositions(context);
+        boolean posChanged = false;
+        for (String k : storageKeys) {
+            if (positions.remove(k) != null) {
+                posChanged = true;
+            }
+        }
+        if (posChanged) {
+            saveShortcutPositions(context, positions);
+        }
+    }
+
+    private static void notifyMediaScannerPaths(Context context, List<String> paths) {
+        if (context == null || paths == null || paths.isEmpty()) return;
+        try {
+            MediaScannerConnection.scanFile(
+                    context.getApplicationContext(),
+                    paths.toArray(new String[0]),
+                    null,
+                    null);
+        } catch (Throwable ignored) {}
     }
 
     private static boolean isHoneyDragInfo(Object obj) {
