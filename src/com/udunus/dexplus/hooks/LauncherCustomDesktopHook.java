@@ -2652,8 +2652,8 @@ public final class LauncherCustomDesktopHook {
             final boolean freePlacement = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
             int ord = 0;
             if (fileBased) {
-                popup.getMenu().add(0, 10, ord++, "New folder...");
-                popup.getMenu().add(0, 11, ord++, "New text file...");
+                popup.getMenu().add(0, 10, ord++, "New folder");
+                popup.getMenu().add(0, 11, ord++, "New text file");
                 popup.getMenu().add(0, 12, ord++, "Open Desktop folder in My Files");
             }
             popup.getMenu().add(0, 13, ord++, freePlacement ? "✓ Free grid placement" : "Free grid placement");
@@ -2667,10 +2667,10 @@ public final class LauncherCustomDesktopHook {
                 public boolean onMenuItemClick(android.view.MenuItem item) {
                     switch (item.getItemId()) {
                         case 10:
-                            showCreateDesktopFileDialog(context, true);
+                            createDesktopFileAndRenameInline(context, true);
                             return true;
                         case 11:
-                            showCreateDesktopFileDialog(context, false);
+                            createDesktopFileAndRenameInline(context, false);
                             return true;
                         case 12:
                             File dir = getDesktopDirectory(context);
@@ -2704,59 +2704,50 @@ public final class LauncherCustomDesktopHook {
             popup.show();
         }
 
-        private void showCreateDesktopFileDialog(final Context context, final boolean folder) {
-            final EditText input = new EditText(context);
-            input.setSingleLine(true);
-            input.setText(folder ? "New folder" : "New Text Document.txt");
-            input.selectAll();
+        private void createDesktopFileAndRenameInline(final Context context, final boolean folder) {
+            File dir = getDesktopDirectory(context);
+            if (dir == null) return;
+            String baseName = folder ? "New Folder" : "New Text Document.txt";
+            File target = uniqueChildFile(dir, baseName);
+            boolean ok = false;
+            try {
+                ok = folder ? target.mkdirs() : target.createNewFile();
+            } catch (Throwable t) {
+                XposedBridge.log(ModConfig.TAG + ": create desktop file error: " + t);
+            }
+            if (!ok) {
+                Toast.makeText(context, "Could not create item", Toast.LENGTH_SHORT).show();
+                return;
+            }
 
-            LinearLayout wrap = new LinearLayout(context);
-            wrap.setOrientation(LinearLayout.VERTICAL);
-            wrap.setPadding(dpToPx(context, 20), dpToPx(context, 12), dpToPx(context, 20), dpToPx(context, 4));
-            wrap.addView(input);
+            String key = FILE_ENTRY_PREFIX + target.getName();
+            List<String> order = readSavedKeyOrder(context);
+            if (!order.contains(key)) {
+                order.add(key);
+                saveShortcutList(context, new LinkedHashSet<>(order));
+            }
+            if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true)
+                    && mPendingAddCol >= 0 && mPendingAddRow >= 0) {
+                assignOrSwapSlot(context, key, mPendingAddCol, mPendingAddRow);
+                mPendingAddCol = -1;
+                mPendingAddRow = -1;
+            }
+            rebuildGrid();
+            selectSingle(key);
+            mUiHandler.removeCallbacks(mDebouncedFileRefresh);
 
-            new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(folder ? "New Folder" : "New Text File")
-                    .setView(wrap)
-                    .setPositiveButton("Create", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            String name = input.getText().toString().trim();
-                            if (TextUtils.isEmpty(name) || name.contains("/") || name.startsWith(".")) {
-                                Toast.makeText(context, "Invalid name", Toast.LENGTH_SHORT).show();
-                                return;
-                            }
-                            File dir = getDesktopDirectory(context);
-                            if (dir == null) return;
-                            File target = uniqueChildFile(dir, name);
-                            boolean ok = false;
-                            try {
-                                ok = folder ? target.mkdirs() : target.createNewFile();
-                            } catch (Throwable t) {
-                                XposedBridge.log(ModConfig.TAG + ": create desktop file error: " + t);
-                            }
-                            if (ok) {
-                                String key = FILE_ENTRY_PREFIX + target.getName();
-                                List<String> order = readSavedKeyOrder(context);
-                                if (!order.contains(key)) {
-                                    order.add(key);
-                                    saveShortcutList(context, new LinkedHashSet<>(order));
-                                }
-                                if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true)
-                                        && mPendingAddCol >= 0 && mPendingAddRow >= 0) {
-                                    assignOrSwapSlot(context, key, mPendingAddCol, mPendingAddRow);
-                                    mPendingAddCol = -1;
-                                    mPendingAddRow = -1;
-                                }
-                                rebuildGrid();
-                                selectSingle(key);
-                            } else {
-                                Toast.makeText(context, "Could not create item", Toast.LENGTH_SHORT).show();
-                            }
+            View createdCell = findCellByKey(key);
+            if (createdCell != null && createdCell.getTag() instanceof DesktopShortcutItem) {
+                final DesktopShortcutItem createdItem = (DesktopShortcutItem) createdCell.getTag();
+                postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isAttachedToWindow()) {
+                            startInlineRename(context, createdItem);
                         }
-                    })
-                    .setNegativeButton("Cancel", null)
-                    .show();
+                    }
+                }, 60L);
+            }
         }
 
         private View findCellByKey(String storageKey) {
@@ -2800,6 +2791,7 @@ public final class LauncherCustomDesktopHook {
 
         private void startInlineRename(final Context context, final DesktopShortcutItem item) {
             if (context == null || item == null || item.backingFile == null) return;
+            if (!isAttachedToWindow() || !isShown() || getWidth() == 0) return;
             if (mInlineRenameEditor != null) {
                 finishInlineRename(true);
             }
@@ -2807,6 +2799,17 @@ public final class LauncherCustomDesktopHook {
             if (cell == null) return;
             TextView labelView = cell.findViewById(android.R.id.text1);
             if (labelView == null) return;
+            if (cell.getWidth() == 0 || labelView.getHeight() == 0) {
+                cell.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isAttachedToWindow() && cell.isAttachedToWindow()) {
+                            startInlineRename(context, item);
+                        }
+                    }
+                });
+                return;
+            }
 
             final boolean isDexsc = item.backingFile.getName().toLowerCase(Locale.ROOT).endsWith(DEXSC_EXT);
             final String initialName = isDexsc ? item.label : item.backingFile.getName();
@@ -2829,7 +2832,7 @@ public final class LauncherCustomDesktopHook {
 
             final int marginSide = dpToPx(context, 6);
             int maxAllowedW = Math.max(dpToPx(context, 80), getWidth() - (marginSide * 2));
-            int editorW = Math.min(maxAllowedW, Math.max(cellRect.width() + dpToPx(context, 20), dpToPx(context, 132)));
+            int editorW = Math.min(maxAllowedW, Math.max(cellRect.width() + dpToPx(context, 48), dpToPx(context, 168)));
             int left = cellRect.centerX() - (editorW / 2);
             left = Math.max(marginSide, Math.min(left, Math.max(marginSide, getWidth() - editorW - marginSide)));
             int top = Math.max(dpToPx(context, 4), labelRect.top - dpToPx(context, 4));
