@@ -1,6 +1,7 @@
 package com.udunus.dexplus.hooks;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.app.AndroidAppHelper;
@@ -107,6 +108,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -136,6 +138,7 @@ public final class LauncherCustomDesktopHook {
     private static final String DOTFILE_LAYOUT = ".dexplus_layout";
     private static final String DOTFILE_ORDER = ".dexplus_order";
     private static final ExecutorService sThumbExecutor = Executors.newFixedThreadPool(2);
+    private static final ExecutorService sExternalMoveExecutor = Executors.newSingleThreadExecutor();
     private static final LruCache<String, Bitmap> sThumbCache = new LruCache<>(64);
 
     private static volatile FrameLayout sActiveDesktopContainer;
@@ -862,28 +865,37 @@ public final class LauncherCustomDesktopHook {
             final DesktopShortcutItem item;
             final View sourceCell;
             final List<String> draggedKeys;
+            final List<DesktopShortcutItem> draggedItems;
             final Map<String, int[]> startSlots;
             final float startGridX;
             final float startGridY;
             final boolean openMenuIfStationary;
+            final boolean externalFileDrag;
+            final long dragStartEpochSec;
             float maxDistSq = 0f;
             boolean handledDrop = false;
+            boolean dragEndedHandled = false;
 
             DragSession(
                     DesktopShortcutItem item,
                     View sourceCell,
                     List<String> draggedKeys,
+                    List<DesktopShortcutItem> draggedItems,
                     Map<String, int[]> startSlots,
                     float startGridX,
                     float startGridY,
-                    boolean openMenuIfStationary) {
+                    boolean openMenuIfStationary,
+                    boolean externalFileDrag) {
                 this.item = item;
                 this.sourceCell = sourceCell;
                 this.draggedKeys = draggedKeys;
+                this.draggedItems = draggedItems;
                 this.startSlots = startSlots;
                 this.startGridX = startGridX;
                 this.startGridY = startGridY;
                 this.openMenuIfStationary = openMenuIfStationary;
+                this.externalFileDrag = externalFileDrag;
+                this.dragStartEpochSec = Math.max(0L, (System.currentTimeMillis() / 1000L) - 2L);
             }
 
             void recordGridPoint(float gx, float gy) {
@@ -2033,12 +2045,14 @@ public final class LauncherCustomDesktopHook {
                     selectSingle(item.storageKey);
                 }
                 List<String> draggedKeys = new ArrayList<>();
+                List<DesktopShortcutItem> draggedItems = new ArrayList<>();
                 Map<String, int[]> startSlots = new HashMap<>();
                 for (View cv : getVisuallyOrderedCells()) {
                     if (!(cv.getTag() instanceof DesktopShortcutItem)) continue;
                     DesktopShortcutItem di = (DesktopShortcutItem) cv.getTag();
                     if (mSelectedKeys.contains(di.storageKey)) {
                         draggedKeys.add(di.storageKey);
+                        draggedItems.add(di);
                         int[] pos = mSlotMap.get(cv);
                         if (pos != null) {
                             startSlots.put(di.storageKey, new int[]{pos[0], pos[1]});
@@ -2047,17 +2061,29 @@ public final class LauncherCustomDesktopHook {
                 }
                 if (draggedKeys.isEmpty()) {
                     draggedKeys.add(item.storageKey);
+                    draggedItems.add(item);
                     int[] pos = mSlotMap.get(cell);
                     if (pos != null) {
                         startSlots.put(item.storageKey, new int[]{pos[0], pos[1]});
                     }
                 }
 
-                ClipData clip = ClipData.newPlainText("dexplus_shortcut", item.storageKey);
+                ClipData clip = buildExternalDragClipData(getContext(), draggedItems);
+                int dragFlags;
+                boolean externalFileDrag = (clip != null);
+                if (externalFileDrag) {
+                    dragFlags = View.DRAG_FLAG_GLOBAL
+                            | View.DRAG_FLAG_GLOBAL_URI_READ
+                            | View.DRAG_FLAG_GLOBAL_URI_WRITE;
+                } else {
+                    clip = ClipData.newPlainText("dexplus_shortcut", item.storageKey);
+                    dragFlags = 0;
+                }
                 View.DragShadowBuilder shadow = new MultiDragShadowBuilder(cell, draggedKeys.size());
                 DragSession session = new DragSession(
-                        item, cell, draggedKeys, startSlots, startGridX, startGridY, openMenuIfStationary);
-                cell.startDragAndDrop(clip, shadow, session, 0);
+                        item, cell, draggedKeys, draggedItems, startSlots,
+                        startGridX, startGridY, openMenuIfStationary, externalFileDrag);
+                cell.startDragAndDrop(clip, shadow, session, dragFlags);
                 for (View cv : mCellViews) {
                     if (cv.getTag() instanceof DesktopShortcutItem
                             && draggedKeys.contains(((DesktopShortcutItem) cv.getTag()).storageKey)) {
@@ -2186,7 +2212,12 @@ public final class LauncherCustomDesktopHook {
             Object local = event.getLocalState();
             if (local instanceof DragSession) {
                 final DragSession session = (DragSession) local;
-                if (session.openMenuIfStationary && !session.handledDrop) {
+                if (session.dragEndedHandled) return;
+                session.dragEndedHandled = true;
+                if (session.externalFileDrag && !session.handledDrop && event.getResult()) {
+                    scheduleExternalMoveCleanupIfCopiedByMyFiles(getContext(), session);
+                }
+                if (session.openMenuIfStationary && !session.handledDrop && !event.getResult()) {
                     Context ctx = getContext();
                     float stationaryLimit = Math.max(ViewConfiguration.get(ctx).getScaledTouchSlop(), dpToPx(ctx, 10)) * 2.0f;
                     if (session.maxDistSq <= (stationaryLimit * stationaryLimit)) {
@@ -2208,6 +2239,114 @@ public final class LauncherCustomDesktopHook {
             } else {
                 sLastHoneyDragInfo = null;
             }
+        }
+
+        /**
+         * Samsung My Files handles external drops as Copy (menu_type=10). When Desktop items
+         * are accepted externally while My Files is active and verified new copies appear outside
+         * the Desktop directory, convert the operation into a Move by removing the source items.
+         */
+        private void scheduleExternalMoveCleanupIfCopiedByMyFiles(final Context ctx, final DragSession session) {
+            if (ctx == null || session == null || session.draggedItems == null || session.draggedItems.isEmpty()) {
+                return;
+            }
+            if (!isMyFilesTaskActive(ctx)) return;
+            final File desktopDir = getDesktopDirectory(ctx);
+            if (desktopDir == null) return;
+            final String desktopPath = desktopDir.getAbsolutePath();
+
+            final List<DesktopShortcutItem> candidates = new ArrayList<>();
+            final Map<String, Long> expectedSizes = new HashMap<>();
+            final Map<String, Integer> expectedDirCounts = new HashMap<>();
+            for (DesktopShortcutItem di : session.draggedItems) {
+                if (di == null || !di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+                candidates.add(di);
+                if (di.backingFile.isDirectory()) {
+                    expectedDirCounts.put(di.storageKey, countRegularFiles(di.backingFile, 2000));
+                } else {
+                    expectedSizes.put(di.storageKey, di.backingFile.length());
+                }
+            }
+            if (candidates.isEmpty()) return;
+
+            final long minEpochSec = session.dragStartEpochSec;
+            sExternalMoveExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final List<DesktopShortcutItem> pending = new ArrayList<>(candidates);
+                    final List<DesktopShortcutItem> verified = new ArrayList<>();
+                    final long[] pollDelaysMs = new long[]{150L, 250L, 400L, 600L, 800L, 1200L, 1600L, 2000L, 2500L};
+
+                    long deadlineMs = SystemClock.uptimeMillis() + 60000L;
+                    int step = 0;
+                    while (!pending.isEmpty()) {
+                        long waitMs = (step < pollDelaysMs.length) ? pollDelaysMs[step++] : 1500L;
+                        try {
+                            Thread.sleep(waitMs);
+                        } catch (InterruptedException ignored) {
+                            break;
+                        }
+
+                        boolean[] inProgressOut = new boolean[1];
+                        Iterator<DesktopShortcutItem> it = pending.iterator();
+                        while (it.hasNext()) {
+                            DesktopShortcutItem item = it.next();
+                            if (!item.backingFile.exists()) {
+                                it.remove();
+                                continue;
+                            }
+                            boolean isDir = item.backingFile.isDirectory();
+                            long expectedSize = expectedSizes.containsKey(item.storageKey)
+                                    ? expectedSizes.get(item.storageKey) : -1L;
+                            int expectedCount = expectedDirCounts.containsKey(item.storageKey)
+                                    ? expectedDirCounts.get(item.storageKey) : 0;
+                            if (findVerifiedExternalCopy(
+                                    ctx, item.backingFile, isDir, expectedSize, expectedCount,
+                                    minEpochSec, desktopPath, inProgressOut)) {
+                                verified.add(item);
+                                it.remove();
+                            }
+                        }
+
+                        if (!verified.isEmpty()) {
+                            final List<DesktopShortcutItem> batch = new ArrayList<>(verified);
+                            verified.clear();
+                            mUiHandler.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    List<String> keysToRemove = new ArrayList<>();
+                                    List<String> scanPaths = new ArrayList<>();
+                                    boolean anyRemoved = false;
+                                    for (DesktopShortcutItem di : batch) {
+                                        if (di.backingFile != null && di.backingFile.exists()) {
+                                            if (deleteRecursive(di.backingFile)) {
+                                                anyRemoved = true;
+                                                keysToRemove.add(di.storageKey);
+                                                scanPaths.add(di.backingFile.getAbsolutePath());
+                                            }
+                                        }
+                                    }
+                                    if (!keysToRemove.isEmpty()) {
+                                        removeDesktopKeysWithoutDeletingFiles(ctx, keysToRemove);
+                                    }
+                                    if (!scanPaths.isEmpty()) {
+                                        notifyMediaScannerPaths(ctx, scanPaths);
+                                    }
+                                    if (anyRemoved && isAttachedToWindow()) {
+                                        rebuildGrid();
+                                    }
+                                }
+                            });
+                        }
+
+                        if (pending.isEmpty()) break;
+                        // Stop after short window unless an active partial copy is still catching up.
+                        if (step >= pollDelaysMs.length && (!inProgressOut[0] || SystemClock.uptimeMillis() >= deadlineMs)) {
+                            break;
+                        }
+                    }
+                }
+            });
         }
 
         private boolean handleExternalDragDrop(
@@ -4727,6 +4866,243 @@ public final class LauncherCustomDesktopHook {
                     null,
                     null);
         } catch (Throwable ignored) {}
+    }
+
+    /** Builds a cross-app ClipData payload with MediaStore URIs for dragged Desktop files/folders. */
+    private static ClipData buildExternalDragClipData(Context ctx, List<DesktopShortcutItem> items) {
+        if (ctx == null || items == null || items.isEmpty()) return null;
+        List<Uri> uris = new ArrayList<>();
+        List<File> files = new ArrayList<>();
+        LinkedHashSet<String> mimeSet = new LinkedHashSet<>();
+
+        for (DesktopShortcutItem di : items) {
+            if (di == null || !di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+            Uri mediaUri = resolveMediaStoreUriForFile(ctx, di.backingFile);
+            if (mediaUri == null) continue;
+            uris.add(mediaUri);
+            files.add(di.backingFile);
+            mimeSet.add(guessMimeTypeForDragFile(di.backingFile));
+        }
+        if (uris.isEmpty()) return null;
+
+        if (mimeSet.isEmpty()) {
+            mimeSet.add("application/octet-stream");
+        }
+        ClipDescription desc = new ClipDescription("selectedUri", mimeSet.toArray(new String[0]));
+        if (Build.VERSION.SDK_INT >= 24) {
+            try {
+                PersistableBundle extras = new PersistableBundle();
+                extras.putString("path", files.get(0).getAbsolutePath());
+                desc.setExtras(extras);
+            } catch (Throwable ignored) {}
+        }
+        ClipData clip = new ClipData(desc, new ClipData.Item(uris.get(0)));
+        for (int i = 1; i < uris.size(); i++) {
+            clip.addItem(new ClipData.Item(uris.get(i)));
+        }
+        return clip;
+    }
+
+    private static Uri resolveMediaStoreUriForFile(Context ctx, File file) {
+        if (ctx == null || file == null || !file.exists()) return null;
+        Uri existing = queryMediaStoreFileUri(ctx, file);
+        if (existing != null) return existing;
+
+        final Uri[] scannedHolder = new Uri[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        try {
+            MediaScannerConnection.scanFile(
+                    ctx.getApplicationContext(),
+                    new String[]{file.getAbsolutePath()},
+                    null,
+                    new MediaScannerConnection.OnScanCompletedListener() {
+                        @Override
+                        public void onScanCompleted(String path, Uri uri) {
+                            scannedHolder[0] = uri;
+                            latch.countDown();
+                        }
+                    });
+            latch.await(300L, TimeUnit.MILLISECONDS);
+        } catch (Throwable ignored) {}
+
+        Uri scanned = scannedHolder[0];
+        if (scanned != null && "media".equals(scanned.getAuthority())) {
+            try {
+                long id = ContentUris.parseId(scanned);
+                if (id >= 0L) {
+                    return ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), id);
+                }
+            } catch (Throwable ignored) {}
+            return scanned;
+        }
+        return queryMediaStoreFileUri(ctx, file);
+    }
+
+    private static Uri queryMediaStoreFileUri(Context ctx, File file) {
+        if (ctx == null || file == null) return null;
+        Uri table = MediaStore.Files.getContentUri("external");
+        try (Cursor c = ctx.getContentResolver().query(
+                table,
+                new String[]{MediaStore.MediaColumns._ID},
+                MediaStore.MediaColumns.DATA + "=?",
+                new String[]{file.getAbsolutePath()},
+                null)) {
+            if (c != null && c.moveToFirst()) {
+                long id = c.getLong(0);
+                if (id >= 0L) {
+                    return ContentUris.withAppendedId(table, id);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static String guessMimeTypeForDragFile(File file) {
+        if (file == null || file.isDirectory()) return "application/octet-stream";
+        String name = file.getName();
+        int dot = name.lastIndexOf('.');
+        if (dot > 0 && dot + 1 < name.length()) {
+            String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+            String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+            if (!TextUtils.isEmpty(mime) && !"text/vnd.android.intent".equalsIgnoreCase(mime)) {
+                return mime;
+            }
+        }
+        return "application/octet-stream";
+    }
+
+    private static boolean isMyFilesTaskActive(Context ctx) {
+        if (ctx == null) return false;
+        try {
+            ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return false;
+            @SuppressWarnings("deprecation")
+            List<ActivityManager.RunningTaskInfo> tasks = am.getRunningTasks(20);
+            if (tasks != null) {
+                for (ActivityManager.RunningTaskInfo ti : tasks) {
+                    if (ti == null) continue;
+                    String topPkg = ti.topActivity != null ? ti.topActivity.getPackageName() : null;
+                    String basePkg = ti.baseActivity != null ? ti.baseActivity.getPackageName() : null;
+                    if ("com.sec.android.app.myfiles".equals(topPkg)
+                            || "com.sec.android.app.myfiles".equals(basePkg)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static boolean findVerifiedExternalCopy(
+            Context ctx,
+            File srcFile,
+            boolean isDir,
+            long expectedSize,
+            int expectedDirCount,
+            long minEpochSec,
+            String desktopPath,
+            boolean[] inProgressOut) {
+        if (ctx == null || srcFile == null || TextUtils.isEmpty(desktopPath)) return false;
+        String srcName = srcFile.getName();
+        String desktopPrefix = desktopPath.endsWith("/") ? desktopPath : (desktopPath + "/");
+        Uri table = MediaStore.Files.getContentUri("external");
+        String minStr = String.valueOf(minEpochSec);
+        String selection = "(" + MediaStore.MediaColumns.DATE_ADDED + ">=?"
+                + " OR " + MediaStore.MediaColumns.DATE_MODIFIED + ">=?)";
+        String[] selectionArgs = new String[]{minStr, minStr};
+
+        try (Cursor c = ctx.getContentResolver().query(
+                table,
+                new String[]{MediaStore.MediaColumns.DATA},
+                selection,
+                selectionArgs,
+                MediaStore.MediaColumns._ID + " DESC")) {
+            if (c == null) return false;
+            while (c.moveToNext()) {
+                String dataPath = c.getString(0);
+                if (TextUtils.isEmpty(dataPath)
+                        || dataPath.equals(desktopPath)
+                        || dataPath.startsWith(desktopPrefix)) {
+                    continue;
+                }
+                File dest = new File(dataPath);
+                if (!dest.exists()) continue;
+                if (!isDir) {
+                    if (dest.isFile() && matchesCopiedEntryName(srcName, dest.getName(), false)) {
+                        long destLen = dest.length();
+                        if (destLen == expectedSize) {
+                            return true;
+                        }
+                        if (destLen < expectedSize && inProgressOut != null && inProgressOut.length > 0) {
+                            inProgressOut[0] = true;
+                        }
+                    }
+                } else {
+                    File cur = dest;
+                    for (int depth = 0; cur != null && depth < 6; depth++, cur = cur.getParentFile()) {
+                        String curPath = cur.getAbsolutePath();
+                        if (curPath.equals(desktopPath) || curPath.startsWith(desktopPrefix)) break;
+                        if (cur.isDirectory() && matchesCopiedEntryName(srcName, cur.getName(), true)) {
+                            if (expectedDirCount <= 0
+                                    || countRegularFiles(cur, expectedDirCount + 1) >= expectedDirCount) {
+                                return true;
+                            }
+                            if (inProgressOut != null && inProgressOut.length > 0) {
+                                inProgressOut[0] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static boolean matchesCopiedEntryName(String srcName, String destName, boolean isDir) {
+        if (TextUtils.isEmpty(srcName) || TextUtils.isEmpty(destName)) return false;
+        if (srcName.equals(destName)) return true;
+
+        String base = srcName;
+        String ext = "";
+        if (!isDir) {
+            int dot = srcName.lastIndexOf('.');
+            if (dot > 0) {
+                base = srcName.substring(0, dot);
+                ext = srcName.substring(dot);
+            }
+        }
+        if (!destName.startsWith(base) || (!ext.isEmpty() && !destName.endsWith(ext))) {
+            return false;
+        }
+        String middle = destName.substring(base.length(), destName.length() - ext.length()).trim();
+        if (!middle.startsWith("(") || !middle.endsWith(")") || middle.length() < 3) {
+            return false;
+        }
+        for (int i = 1; i < middle.length() - 1; i++) {
+            if (!Character.isDigit(middle.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    private static int countRegularFiles(File dir, int limit) {
+        if (dir == null || !dir.isDirectory()) return 0;
+        int count = 0;
+        ArrayList<File> stack = new ArrayList<>();
+        stack.add(dir);
+        while (!stack.isEmpty() && count < limit) {
+            File cur = stack.remove(stack.size() - 1);
+            File[] children = cur.listFiles();
+            if (children == null) continue;
+            for (File ch : children) {
+                if (ch.isDirectory()) {
+                    stack.add(ch);
+                } else {
+                    count++;
+                    if (count >= limit) break;
+                }
+            }
+        }
+        return count;
     }
 
     private static boolean isHoneyDragInfo(Object obj) {
