@@ -16,12 +16,19 @@ import android.os.Looper;
 import android.os.Process;
 import android.util.Log;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import de.robv.android.xposed.XSharedPreferences;
 
@@ -60,6 +67,9 @@ public final class ModConfig {
     public static final String KEY_DESKTOP_FILE_BASED = "desktop_file_based";
     public static final String KEY_DESKTOP_FOLDER_PATH = "desktop_folder_path";
     public static final String DEFAULT_DESKTOP_FOLDER_PATH = "/storage/emulated/0/Desktop";
+    public static final String KEY_DESKTOP_NEW_FILE_TYPES = "desktop_new_file_types";
+    public static final String DEFAULT_DESKTOP_NEW_FILE_TYPES =
+            "[{\"ext\":\"txt\",\"label\":\"Text Document\"}]";
 
     // Window Decorations & Status Bar (SystemUI)
     public static final String KEY_HIDE_STATUS_BAR = "hide_status_bar";
@@ -107,6 +117,7 @@ public final class ModConfig {
         defaults.put(KEY_DESKTOP_FREE_PLACEMENT, true);
         defaults.put(KEY_DESKTOP_FILE_BASED, false);
         defaults.put(KEY_DESKTOP_FOLDER_PATH, DEFAULT_DESKTOP_FOLDER_PATH);
+        defaults.put(KEY_DESKTOP_NEW_FILE_TYPES, DEFAULT_DESKTOP_NEW_FILE_TYPES);
 
         defaults.put(KEY_HIDE_STATUS_BAR, true);
         defaults.put(KEY_TOP_EDGE_MAXIMIZE, true);
@@ -442,6 +453,119 @@ public final class ModConfig {
 
     public static boolean isModuleEnabled(Context context) {
         return getBoolean(context, KEY_MODULE_ENABLED, true);
+    }
+
+    /** Custom file template entry shown inside the Desktop "New" submenu. */
+    public static final class NewFileType {
+        public final String ext;
+        public final String label;
+
+        public NewFileType(String ext, String label) {
+            this.ext = ext;
+            this.label = label;
+        }
+
+        public String displayTitle() {
+            String suffix = "(." + ext + ")";
+            if (label.toLowerCase(Locale.ROOT).contains(suffix.toLowerCase(Locale.ROOT))) {
+                return label;
+            }
+            return label + " " + suffix;
+        }
+
+        public String defaultFileName() {
+            String cleanLabel = label.trim();
+            String extSuffix = "." + ext;
+            if (cleanLabel.toLowerCase(Locale.ROOT).endsWith(extSuffix.toLowerCase(Locale.ROOT))) {
+                cleanLabel = cleanLabel.substring(0, cleanLabel.length() - extSuffix.length()).trim();
+            }
+            if (cleanLabel.isEmpty()) {
+                cleanLabel = ext.toUpperCase(Locale.ROOT) + " File";
+            }
+            String stem = cleanLabel.toLowerCase(Locale.ROOT).startsWith("new ")
+                    ? cleanLabel
+                    : "New " + cleanLabel;
+            return stem + extSuffix;
+        }
+    }
+
+    /** Strips leading dots, path separators, and control characters from a file extension. */
+    public static String sanitizeExtension(String rawExt) {
+        if (rawExt == null) return "";
+        String cleaned = rawExt.trim().replace("/", "").replace("\\", "").replace("\0", "");
+        while (cleaned.startsWith(".")) {
+            cleaned = cleaned.substring(1).trim();
+        }
+        if (cleaned.endsWith(".")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1).trim();
+        }
+        return cleaned;
+    }
+
+    /** Sanitizes a file type label, falling back to an uppercased extension label when blank. */
+    public static String sanitizeFileTypeLabel(String rawLabel, String cleanExt) {
+        String label = rawLabel != null
+                ? rawLabel.trim().replace("/", " ").replace("\\", " ").replace("\0", "")
+                : "";
+        if (label.isEmpty() && cleanExt != null && !cleanExt.isEmpty()) {
+            return cleanExt.toUpperCase(Locale.ROOT) + " File";
+        }
+        return label;
+    }
+
+    /** Parses the stored JSON list of custom "New" menu file types. */
+    public static List<NewFileType> parseNewFileTypes(String raw) {
+        String source = (raw == null || raw.trim().isEmpty()) ? DEFAULT_DESKTOP_NEW_FILE_TYPES : raw.trim();
+        List<NewFileType> out = new ArrayList<NewFileType>();
+        Set<String> seenExts = new HashSet<String>();
+        try {
+            JSONArray arr = new JSONArray(source);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.optJSONObject(i);
+                if (obj == null) continue;
+                String ext = sanitizeExtension(obj.optString("ext", ""));
+                if (ext.isEmpty()) continue;
+                String key = ext.toLowerCase(Locale.ROOT);
+                if (!seenExts.add(key)) continue;
+                String label = sanitizeFileTypeLabel(obj.optString("label", ""), ext);
+                out.add(new NewFileType(ext, label));
+            }
+            return out;
+        } catch (Throwable ignored) {
+            if (!DEFAULT_DESKTOP_NEW_FILE_TYPES.equals(source)) {
+                return parseNewFileTypes(DEFAULT_DESKTOP_NEW_FILE_TYPES);
+            }
+            return out;
+        }
+    }
+
+    /** Serializes custom "New" menu file types to JSON for ModConfig storage. */
+    public static String serializeNewFileTypes(List<NewFileType> types) {
+        JSONArray arr = new JSONArray();
+        if (types != null) {
+            Set<String> seenExts = new HashSet<String>();
+            for (int i = 0; i < types.size(); i++) {
+                NewFileType t = types.get(i);
+                if (t == null) continue;
+                String ext = sanitizeExtension(t.ext);
+                if (ext.isEmpty()) continue;
+                if (!seenExts.add(ext.toLowerCase(Locale.ROOT))) continue;
+                String label = sanitizeFileTypeLabel(t.label, ext);
+                try {
+                    JSONObject obj = new JSONObject();
+                    obj.put("ext", ext);
+                    obj.put("label", label);
+                    arr.put(obj);
+                } catch (Throwable ignored) {}
+            }
+        }
+        return arr.toString();
+    }
+
+    /** Returns the active custom file types configured for the Desktop "New" submenu. */
+    public static List<NewFileType> getNewFileTypes(Context context) {
+        return parseNewFileTypes(
+                getString(context, KEY_DESKTOP_NEW_FILE_TYPES, DEFAULT_DESKTOP_NEW_FILE_TYPES));
     }
 
     private static boolean restartRegistered;

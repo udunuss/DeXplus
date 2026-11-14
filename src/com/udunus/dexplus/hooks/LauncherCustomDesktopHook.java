@@ -3080,9 +3080,16 @@ public final class LauncherCustomDesktopHook {
             boolean fileBased = isFileBasedDesktop(context);
             final boolean freePlacement = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
             int ord = 0;
+            final int customBaseId = 1000;
+            final List<ModConfig.NewFileType> newFileTypes =
+                    fileBased ? ModConfig.getNewFileTypes(context) : null;
             if (fileBased) {
-                popup.getMenu().add(0, 10, ord++, "New folder");
-                popup.getMenu().add(0, 11, ord++, "New text file");
+                android.view.SubMenu newSub = popup.getMenu().addSubMenu(0, 100, ord++, "New");
+                int subOrd = 0;
+                newSub.add(0, 10, subOrd++, "Folder");
+                for (int i = 0; i < newFileTypes.size(); i++) {
+                    newSub.add(0, customBaseId + i, subOrd++, newFileTypes.get(i).displayTitle());
+                }
                 popup.getMenu().add(0, 12, ord++, "Open Desktop folder in My Files");
             }
             popup.getMenu().add(0, 13, ord++, freePlacement ? "✓ Free grid placement" : "Free grid placement");
@@ -3094,12 +3101,16 @@ public final class LauncherCustomDesktopHook {
             popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
                 @Override
                 public boolean onMenuItemClick(android.view.MenuItem item) {
-                    switch (item.getItemId()) {
+                    int id = item.getItemId();
+                    if (newFileTypes != null && id >= customBaseId
+                            && id < customBaseId + newFileTypes.size()) {
+                        createDesktopFileAndRenameInline(context, false,
+                                newFileTypes.get(id - customBaseId).defaultFileName());
+                        return true;
+                    }
+                    switch (id) {
                         case 10:
-                            createDesktopFileAndRenameInline(context, true);
-                            return true;
-                        case 11:
-                            createDesktopFileAndRenameInline(context, false);
+                            createDesktopFileAndRenameInline(context, true, null);
                             return true;
                         case 12:
                             File dir = getDesktopDirectory(context);
@@ -3133,10 +3144,15 @@ public final class LauncherCustomDesktopHook {
             popup.show();
         }
 
-        private void createDesktopFileAndRenameInline(final Context context, final boolean folder) {
+        private void createDesktopFileAndRenameInline(
+                final Context context, final boolean folder, final String customFileName) {
             File dir = getDesktopDirectory(context);
             if (dir == null) return;
-            String baseName = folder ? "New Folder" : "New Text Document.txt";
+            String baseName = folder
+                    ? "New Folder"
+                    : (customFileName != null && !customFileName.trim().isEmpty()
+                            ? customFileName.trim()
+                            : "New Text Document.txt");
             File target = uniqueChildFile(dir, baseName);
             boolean ok = false;
             try {

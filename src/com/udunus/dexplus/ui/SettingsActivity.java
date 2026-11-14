@@ -601,6 +601,11 @@ public class SettingsActivity extends Activity {
                 ModConfig.DEFAULT_DESKTOP_FOLDER_PATH);
         page.addView(wsCard);
 
+        addSectionLabel(page, "\"NEW\" MENU FILE TYPES");
+        LinearLayout newTypesCard = createCard();
+        addNewFileTypesSection(newTypesCard);
+        page.addView(newTypesCard);
+
         addSectionLabel(page, "ICON SIZE");
         LinearLayout gridCard = createCard();
         addSeekBarRow(gridCard,
@@ -1139,6 +1144,230 @@ public class SettingsActivity extends Activity {
         btnLp.setMarginStart(dp(12));
         row.addView(changeBtn, btnLp);
         card.addView(row);
+    }
+
+    private void addNewFileTypesSection(LinearLayout card) {
+        LinearLayout headerRow = new LinearLayout(this);
+        headerRow.setOrientation(LinearLayout.HORIZONTAL);
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        headerRow.setPadding(dp(18), dp(14), dp(18), dp(14));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView titleTv = new TextView(this);
+        titleTv.setText("Custom \"New\" File Types");
+        titleTv.setTextColor(mTextPrimary);
+        titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        titleTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        textCol.addView(titleTv);
+
+        TextView sumTv = new TextView(this);
+        sumTv.setText("Templates shown under Desktop right-click → New (Folder is always included).");
+        sumTv.setTextColor(mTextSecondary);
+        sumTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
+        LinearLayout.LayoutParams sumLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sumLp.topMargin = dp(2);
+        textCol.addView(sumTv, sumLp);
+
+        headerRow.addView(textCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        final LinearLayout listContainer = new LinearLayout(this);
+        listContainer.setOrientation(LinearLayout.VERTICAL);
+
+        final Runnable[] refreshHolder = new Runnable[1];
+        refreshHolder[0] = new Runnable() {
+            @Override
+            public void run() {
+                populateNewFileTypeRows(listContainer, refreshHolder[0]);
+            }
+        };
+
+        Button resetBtn = createStyledButton("Reset",
+                mIsDark ? Color.rgb(42, 54, 74) : Color.rgb(226, 232, 240), mTextPrimary);
+        resetBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                mPrefs.edit().remove(ModConfig.KEY_DESKTOP_NEW_FILE_TYPES).commit();
+                ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
+                refreshHolder[0].run();
+            }
+        });
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        resetLp.setMarginStart(dp(10));
+        headerRow.addView(resetBtn, resetLp);
+
+        Button addBtn = createStyledButton("Add Type", mAccentColor, Color.WHITE);
+        addBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showAddNewFileTypeDialog(refreshHolder[0]);
+            }
+        });
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        addLp.setMarginStart(dp(8));
+        headerRow.addView(addBtn, addLp);
+
+        card.addView(headerRow);
+        card.addView(listContainer);
+        refreshHolder[0].run();
+    }
+
+    private List<ModConfig.NewFileType> loadConfiguredNewFileTypes() {
+        String raw = mPrefs.getString(
+                ModConfig.KEY_DESKTOP_NEW_FILE_TYPES,
+                ModConfig.DEFAULT_DESKTOP_NEW_FILE_TYPES);
+        return ModConfig.parseNewFileTypes(raw);
+    }
+
+    private void saveConfiguredNewFileTypes(List<ModConfig.NewFileType> types) {
+        mPrefs.edit()
+                .putString(ModConfig.KEY_DESKTOP_NEW_FILE_TYPES, ModConfig.serializeNewFileTypes(types))
+                .commit();
+        ModConfig.broadcastChanges(SettingsActivity.this, mPrefs);
+    }
+
+    private void populateNewFileTypeRows(LinearLayout container, final Runnable refresh) {
+        container.removeAllViews();
+        final List<ModConfig.NewFileType> types = loadConfiguredNewFileTypes();
+        if (types.isEmpty()) {
+            addDivider(container);
+            TextView emptyTv = new TextView(this);
+            emptyTv.setText("No file types configured — only Folder will appear under New.");
+            emptyTv.setTextColor(mTextSecondary);
+            emptyTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            emptyTv.setPadding(dp(18), dp(12), dp(18), dp(14));
+            container.addView(emptyTv);
+            return;
+        }
+        int removeBg = mIsDark ? Color.rgb(66, 36, 42) : Color.rgb(254, 226, 226);
+        int removeFg = mIsDark ? Color.rgb(252, 165, 165) : Color.rgb(185, 28, 28);
+        for (int i = 0; i < types.size(); i++) {
+            final int index = i;
+            final ModConfig.NewFileType entry = types.get(i);
+            addDivider(container);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(18), dp(12), dp(18), dp(12));
+
+            LinearLayout textCol = new LinearLayout(this);
+            textCol.setOrientation(LinearLayout.VERTICAL);
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText(entry.displayTitle());
+            titleTv.setTextColor(mTextPrimary);
+            titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
+            titleTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            textCol.addView(titleTv);
+
+            TextView subTv = new TextView(this);
+            subTv.setText("Creates \"" + entry.defaultFileName() + "\"");
+            subTv.setTextColor(mTextSecondary);
+            subTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+            LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            subLp.topMargin = dp(2);
+            textCol.addView(subTv, subLp);
+
+            row.addView(textCol, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            Button removeBtn = createStyledButton("Remove", removeBg, removeFg);
+            removeBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    List<ModConfig.NewFileType> updated = loadConfiguredNewFileTypes();
+                    if (index >= 0 && index < updated.size()) {
+                        updated.remove(index);
+                        saveConfiguredNewFileTypes(updated);
+                        refresh.run();
+                    }
+                }
+            });
+            LinearLayout.LayoutParams remLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            remLp.setMarginStart(dp(10));
+            row.addView(removeBtn, remLp);
+            container.addView(row);
+        }
+    }
+
+    private void showAddNewFileTypeDialog(final Runnable refresh) {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(10), dp(20), dp(4));
+
+        TextView labelPrompt = new TextView(this);
+        labelPrompt.setText("Display name");
+        labelPrompt.setTextColor(mTextSecondary);
+        labelPrompt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        form.addView(labelPrompt);
+
+        final EditText labelInput = new EditText(this);
+        labelInput.setHint("e.g. Markdown Document");
+        labelInput.setSingleLine(true);
+        form.addView(labelInput);
+
+        TextView extPrompt = new TextView(this);
+        extPrompt.setText("File extension");
+        extPrompt.setTextColor(mTextSecondary);
+        extPrompt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        LinearLayout.LayoutParams extPromptLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        extPromptLp.topMargin = dp(10);
+        form.addView(extPrompt, extPromptLp);
+
+        final EditText extInput = new EditText(this);
+        extInput.setHint("e.g. md or .md");
+        extInput.setSingleLine(true);
+        form.addView(extInput);
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Add New File Type")
+                .setView(form)
+                .setPositiveButton("Add", null)
+                .setNegativeButton("Cancel", null)
+                .create();
+        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            @Override
+            public void onShow(DialogInterface d) {
+                Button pos = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                if (pos == null) return;
+                pos.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        String cleanExt = ModConfig.sanitizeExtension(extInput.getText().toString());
+                        if (cleanExt.isEmpty()) {
+                            Toast.makeText(SettingsActivity.this,
+                                    "Enter a file extension (e.g. md)", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        String cleanLabel = ModConfig.sanitizeFileTypeLabel(
+                                labelInput.getText().toString(), cleanExt);
+                        List<ModConfig.NewFileType> types = loadConfiguredNewFileTypes();
+                        for (int i = 0; i < types.size(); i++) {
+                            if (types.get(i).ext.equalsIgnoreCase(cleanExt)) {
+                                Toast.makeText(SettingsActivity.this,
+                                        "." + cleanExt + " is already in the list",
+                                        Toast.LENGTH_SHORT).show();
+                                return;
+                            }
+                        }
+                        types.add(new ModConfig.NewFileType(cleanExt, cleanLabel));
+                        saveConfiguredNewFileTypes(types);
+                        refresh.run();
+                        dialog.dismiss();
+                    }
+                });
+            }
+        });
+        dialog.show();
     }
 
     private void addDivider(LinearLayout card) {
