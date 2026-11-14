@@ -23,6 +23,8 @@ import android.content.pm.LauncherApps;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -34,8 +36,10 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -82,7 +86,7 @@ import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.PopupMenu;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -2943,10 +2947,6 @@ public final class LauncherCustomDesktopHook {
         private void showSelectionContextMenu(final Context context, View anchor, final List<DesktopShortcutItem> selected) {
             if (selected == null || selected.isEmpty()) return;
             if (selected.size() > 1) {
-                final int idOpenAll = 1;
-                final int idRemoveAll = 2;
-                final int idSelectAll = 3;
-
                 boolean anyReal = false;
                 for (DesktopShortcutItem it : selected) {
                     if (it.isFileEntry) {
@@ -2954,107 +2954,105 @@ public final class LauncherCustomDesktopHook {
                         break;
                     }
                 }
-                PopupMenu popup = new PopupMenu(context, anchor);
-                popup.getMenu().add(0, idOpenAll, 0, "Open selected (" + selected.size() + ")");
-                popup.getMenu().add(0, idRemoveAll, 1,
-                        (anyReal ? "Delete selected (" : "Remove selected (") + selected.size() + ")");
-                popup.getMenu().add(0, idSelectAll, 2, "Select all");
-                popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+                List<DesktopMenuItem> items = new ArrayList<DesktopMenuItem>();
+                items.add(new DesktopMenuItem("Open selected (" + selected.size() + ")", new Runnable() {
                     @Override
-                    public boolean onMenuItemClick(android.view.MenuItem menuItem) {
-                        int id = menuItem.getItemId();
-                        if (id == idOpenAll) {
-                            launchItems(context, selected, ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
-                            return true;
-                        } else if (id == idRemoveAll) {
-                            confirmAndDeleteOrRemoveSelection(context, selected);
-                            return true;
-                        } else if (id == idSelectAll) {
-                            selectAllItems();
-                            return true;
-                        }
-                        return false;
+                    public void run() {
+                        launchItems(context, selected,
+                                ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
                     }
-                });
-                popup.show();
+                }));
+                items.add(new DesktopMenuItem(
+                        (anyReal ? "Delete selected (" : "Remove selected (") + selected.size() + ")",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                confirmAndDeleteOrRemoveSelection(context, selected);
+                            }
+                        }));
+                items.add(new DesktopMenuItem("Select all", new Runnable() {
+                    @Override
+                    public void run() {
+                        selectAllItems();
+                    }
+                }));
+                showDesktopContextMenuAtAnchor(context, anchor, items);
                 return;
             }
 
             final DesktopShortcutItem item = selected.get(0);
-            final int idOpenWin = 1;
-            final int idOpenFull = 2;
-            final int idAppInfo = 3;
-            final int idRemove = 4;
-            final int idUninstall = 5;
-            final int idQuickEdit = 6;
-            final int idRename = 7;
-            final int idProperties = 8;
-
-            PopupMenu popup = new PopupMenu(context, anchor);
-            popup.getMenu().add(0, idOpenWin, 0, "Open in window");
-            popup.getMenu().add(0, idOpenFull, 1, "Open fullscreen");
-            int order = 2;
+            List<DesktopMenuItem> items = new ArrayList<DesktopMenuItem>();
+            items.add(new DesktopMenuItem("Open in window", new Runnable() {
+                @Override
+                public void run() {
+                    launchShortcut(context, item, true);
+                }
+            }));
+            items.add(new DesktopMenuItem("Open fullscreen", new Runnable() {
+                @Override
+                public void run() {
+                    launchShortcut(context, item, false);
+                }
+            }));
             if (item.isFileEntry && !item.isDirectory && isTextLikeFile(item.backingFile, item.mimeType)) {
-                popup.getMenu().add(0, idQuickEdit, order++, "Quick view / edit text");
+                items.add(new DesktopMenuItem("Quick view / edit text", new Runnable() {
+                    @Override
+                    public void run() {
+                        showQuickTextViewerDialog(context, item.backingFile);
+                    }
+                }));
             }
             if (!TextUtils.isEmpty(item.getPackageName())) {
-                popup.getMenu().add(0, idAppInfo, order++, "App info");
-            }
-            if (item.backingFile != null) {
-                popup.getMenu().add(0, idRename, order++, "Rename");
-            }
-            popup.getMenu().add(0, idRemove, order++,
-                    item.backingFile != null ? (item.isFileEntry ? "Delete" : "Delete shortcut") : "Remove from desktop");
-            if (!item.isCustomShortcut && !item.isFileEntry && item.component != null) {
-                popup.getMenu().add(0, idUninstall, order++, "Uninstall");
-            }
-            if (item.backingFile != null) {
-                popup.getMenu().add(0, idProperties, order++, "Properties");
-            }
-
-            popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
-                @Override
-                public boolean onMenuItemClick(android.view.MenuItem menuItem) {
-                    int id = menuItem.getItemId();
-                    if (id == idOpenWin) {
-                        launchShortcut(context, item, true);
-                        return true;
-                    } else if (id == idOpenFull) {
-                        launchShortcut(context, item, false);
-                        return true;
-                    } else if (id == idQuickEdit && item.backingFile != null) {
-                        showQuickTextViewerDialog(context, item.backingFile);
-                        return true;
-                    } else if (id == idAppInfo) {
+                items.add(new DesktopMenuItem("App info", new Runnable() {
+                    @Override
+                    public void run() {
                         openAppInfo(context, item.getPackageName());
-                        return true;
-                    } else if (id == idRename && item.backingFile != null) {
+                    }
+                }));
+            }
+            if (item.backingFile != null) {
+                items.add(new DesktopMenuItem("Rename", new Runnable() {
+                    @Override
+                    public void run() {
                         postDelayed(new Runnable() {
                             @Override
                             public void run() {
                                 startInlineRename(context, item);
                             }
                         }, 40L);
-                        return true;
-                    } else if (id == idRemove) {
-                        confirmAndDeleteOrRemoveSelection(context, Collections.singletonList(item));
-                        return true;
-                    } else if (id == idUninstall && item.component != null) {
+                    }
+                }));
+            }
+            items.add(new DesktopMenuItem(
+                    item.backingFile != null ? (item.isFileEntry ? "Delete" : "Delete shortcut") : "Remove from desktop",
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            confirmAndDeleteOrRemoveSelection(context, Collections.singletonList(item));
+                        }
+                    }));
+            if (!item.isCustomShortcut && !item.isFileEntry && item.component != null) {
+                items.add(new DesktopMenuItem("Uninstall", new Runnable() {
+                    @Override
+                    public void run() {
                         try {
                             Intent uninstall = new Intent(Intent.ACTION_DELETE,
                                     Uri.fromParts("package", item.component.getPackageName(), null));
                             uninstall.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                             context.startActivity(uninstall);
                         } catch (Throwable ignored) {}
-                        return true;
-                    } else if (id == idProperties && item.backingFile != null) {
-                        showFilePropertiesDialog(context, item);
-                        return true;
                     }
-                    return false;
-                }
-            });
-            popup.show();
+                }));
+            }
+            if (item.backingFile != null) {
+                items.add(new DesktopMenuItem("Properties", new Runnable() {
+                    @Override
+                    public void run() {
+                        showFilePropertiesDialog(context, item);
+                    }
+                }));
+            }
+            showDesktopContextMenuAtAnchor(context, anchor, items);
         }
 
         private void toggleDesktopFreePlacement(Context context, boolean enabled) {
@@ -3076,72 +3074,352 @@ public final class LauncherCustomDesktopHook {
             mPendingAddCol = slot[0];
             mPendingAddRow = slot[1];
             View anchor = prepareAnchorAt(x, y);
-            PopupMenu popup = new PopupMenu(context, anchor);
             boolean fileBased = isFileBasedDesktop(context);
             final boolean freePlacement = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
-            int ord = 0;
-            final int customBaseId = 1000;
-            final List<ModConfig.NewFileType> newFileTypes =
-                    fileBased ? ModConfig.getNewFileTypes(context) : null;
+            List<DesktopMenuItem> items = new ArrayList<DesktopMenuItem>();
             if (fileBased) {
-                android.view.SubMenu newSub = popup.getMenu().addSubMenu(0, 100, ord++, "New");
-                int subOrd = 0;
-                newSub.add(0, 10, subOrd++, "Folder");
+                List<DesktopMenuItem> newSubItems = new ArrayList<DesktopMenuItem>();
+                newSubItems.add(new DesktopMenuItem("Folder", new Runnable() {
+                    @Override
+                    public void run() {
+                        createDesktopFileAndRenameInline(context, true, null);
+                    }
+                }));
+                List<ModConfig.NewFileType> newFileTypes = ModConfig.getNewFileTypes(context);
                 for (int i = 0; i < newFileTypes.size(); i++) {
-                    newSub.add(0, customBaseId + i, subOrd++, newFileTypes.get(i).displayTitle());
+                    final ModConfig.NewFileType ft = newFileTypes.get(i);
+                    newSubItems.add(new DesktopMenuItem(ft.displayTitle(), new Runnable() {
+                        @Override
+                        public void run() {
+                            createDesktopFileAndRenameInline(context, false, ft.defaultFileName());
+                        }
+                    }));
                 }
-                popup.getMenu().add(0, 12, ord++, "Open Desktop folder in My Files");
+                items.add(new DesktopMenuItem("New", newSubItems));
+                items.add(new DesktopMenuItem("Open Desktop folder in My Files", new Runnable() {
+                    @Override
+                    public void run() {
+                        File dir = getDesktopDirectory(context);
+                        if (dir != null) {
+                            openFolderEntry(context, dir,
+                                    ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                        }
+                    }
+                }));
             }
-            popup.getMenu().add(0, 13, ord++, freePlacement ? "✓ Free grid placement" : "Free grid placement");
-            popup.getMenu().add(0, 2, ord++, "Sort icons by name (A–Z)");
-            popup.getMenu().add(0, 7, ord++, "Select all");
-            popup.getMenu().add(0, 3, ord++, "Refresh desktop");
-            popup.getMenu().add(0, 5, ord++, "Wallpaper & style");
-            popup.getMenu().add(0, 6, ord++, "DeX+ Settings");
-            popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
-                @Override
-                public boolean onMenuItemClick(android.view.MenuItem item) {
-                    int id = item.getItemId();
-                    if (newFileTypes != null && id >= customBaseId
-                            && id < customBaseId + newFileTypes.size()) {
-                        createDesktopFileAndRenameInline(context, false,
-                                newFileTypes.get(id - customBaseId).defaultFileName());
-                        return true;
-                    }
-                    switch (id) {
-                        case 10:
-                            createDesktopFileAndRenameInline(context, true, null);
-                            return true;
-                        case 12:
-                            File dir = getDesktopDirectory(context);
-                            if (dir != null) {
-                                openFolderEntry(context, dir, ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
-                            }
-                            return true;
-                        case 13:
+            items.add(new DesktopMenuItem(freePlacement ? "✓ Free grid placement" : "Free grid placement",
+                    new Runnable() {
+                        @Override
+                        public void run() {
                             toggleDesktopFreePlacement(context, !freePlacement);
-                            return true;
-                        case 2:
-                            sortShortcutsAlphabetically(context);
-                            rebuildGrid();
-                            return true;
-                        case 7:
-                            selectAllItems();
-                            return true;
-                        case 3:
-                            rebuildGrid();
-                            return true;
-                        case 5:
-                            openWallpaperAndStyle(context);
-                            return true;
-                        case 6:
-                            openModuleSettings(context);
-                            return true;
+                        }
+                    }));
+            items.add(new DesktopMenuItem("Sort icons by name (A–Z)", new Runnable() {
+                @Override
+                public void run() {
+                    sortShortcutsAlphabetically(context);
+                    rebuildGrid();
+                }
+            }));
+            items.add(new DesktopMenuItem("Select all", new Runnable() {
+                @Override
+                public void run() {
+                    selectAllItems();
+                }
+            }));
+            items.add(new DesktopMenuItem("Refresh desktop", new Runnable() {
+                @Override
+                public void run() {
+                    rebuildGrid();
+                }
+            }));
+            items.add(new DesktopMenuItem("Wallpaper & style", new Runnable() {
+                @Override
+                public void run() {
+                    openWallpaperAndStyle(context);
+                }
+            }));
+            items.add(new DesktopMenuItem("DeX+ Settings", new Runnable() {
+                @Override
+                public void run() {
+                    openModuleSettings(context);
+                }
+            }));
+            showDesktopContextMenuAtAnchor(context, anchor, items);
+        }
+
+        private static final class DesktopMenuItem {
+            final String title;
+            final Runnable action;
+            final List<DesktopMenuItem> subItems;
+
+            DesktopMenuItem(String title, Runnable action) {
+                this.title = title;
+                this.action = action;
+                this.subItems = null;
+            }
+
+            DesktopMenuItem(String title, List<DesktopMenuItem> subItems) {
+                this.title = title;
+                this.action = null;
+                this.subItems = subItems;
+            }
+        }
+
+        /** Shows a desktop right-click PopupWindow with crisp reduced corners and right-aligned submenu arrows. */
+        private void showDesktopContextMenuAtAnchor(
+                final Context context,
+                final View anchor,
+                final List<DesktopMenuItem> items) {
+            if (context == null || anchor == null || items == null || items.isEmpty()) return;
+            int[] anchorLoc = new int[2];
+            anchor.getLocationInWindow(anchorLoc);
+            final PopupWindow[] subHolder = new PopupWindow[1];
+            final PopupWindow mainPopup = buildDesktopMenuPopup(
+                    context, anchor, items, true, null, subHolder);
+            if (mainPopup == null) return;
+            mainPopup.setOnDismissListener(new PopupWindow.OnDismissListener() {
+                @Override
+                public void onDismiss() {
+                    if (subHolder[0] != null) {
+                        try {
+                            subHolder[0].dismiss();
+                        } catch (Throwable ignored) {}
+                        subHolder[0] = null;
                     }
-                    return false;
                 }
             });
-            popup.show();
+            DisplayMetrics dm = context.getResources().getDisplayMetrics();
+            int margin = dpToPx(context, 8);
+            int maxX = Math.max(margin, dm.widthPixels - mainPopup.getWidth() - margin);
+            int maxY = Math.max(margin, dm.heightPixels - mainPopup.getHeight() - margin);
+            int posX = Math.max(margin, Math.min(anchorLoc[0], maxX));
+            int posY = Math.max(margin, Math.min(anchorLoc[1], maxY));
+            try {
+                mainPopup.showAtLocation(anchor, Gravity.NO_GRAVITY, posX, posY);
+            } catch (Throwable t) {
+                XposedBridge.log(ModConfig.TAG + ": showDesktopContextMenu error: " + t);
+            }
+        }
+
+        private PopupWindow buildDesktopMenuPopup(
+                final Context context,
+                final View windowTokenAnchor,
+                final List<DesktopMenuItem> items,
+                final boolean focusable,
+                final PopupWindow rootPopup,
+                final PopupWindow[] subHolder) {
+            final boolean isDark = (context.getResources().getConfiguration().uiMode
+                    & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+            final int bgColor = isDark ? Color.rgb(36, 37, 42) : Color.rgb(252, 252, 254);
+            final int borderColor = isDark ? Color.argb(42, 255, 255, 255) : Color.argb(28, 0, 0, 0);
+            final int textColor = isDark ? Color.rgb(241, 243, 247) : Color.rgb(24, 26, 32);
+            final int arrowColor = isDark ? Color.argb(210, 226, 232, 240) : Color.argb(190, 51, 65, 85);
+            final int rippleColor = isDark ? Color.argb(38, 255, 255, 255) : Color.argb(26, 0, 0, 0);
+            final int hoverColor = isDark ? Color.argb(24, 255, 255, 255) : Color.argb(14, 0, 0, 0);
+            final float radiusPx = dpToPx(context, 8);
+
+            GradientDrawable cardBg = new GradientDrawable();
+            cardBg.setColor(bgColor);
+            cardBg.setCornerRadius(radiusPx);
+            cardBg.setStroke(Math.max(1, dpToPx(context, 1)), borderColor);
+
+            final LinearLayout card = new LinearLayout(context);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(cardBg);
+            card.setClipToOutline(true);
+
+            ScrollView scroll = new ScrollView(context);
+            scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            LinearLayout listCol = new LinearLayout(context);
+            listCol.setOrientation(LinearLayout.VERTICAL);
+            int padV = dpToPx(context, 5);
+            listCol.setPadding(0, padV, 0, padV);
+
+            final PopupWindow popup = new PopupWindow(context);
+            final PopupWindow dismissRoot = rootPopup != null ? rootPopup : popup;
+
+            for (int i = 0; i < items.size(); i++) {
+                final DesktopMenuItem entry = items.get(i);
+                final boolean hasSub = entry.subItems != null && !entry.subItems.isEmpty();
+
+                final LinearLayout row = new LinearLayout(context);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dpToPx(context, 15), dpToPx(context, 10),
+                        dpToPx(context, 14), dpToPx(context, 10));
+                row.setClickable(true);
+                row.setFocusable(true);
+                final ColorDrawable rowBase = new ColorDrawable(Color.TRANSPARENT);
+                row.setBackground(new RippleDrawable(
+                        ColorStateList.valueOf(rippleColor), rowBase, new ColorDrawable(Color.WHITE)));
+
+                TextView label = new TextView(context);
+                label.setText(entry.title);
+                label.setTextColor(textColor);
+                label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+                label.setSingleLine(true);
+                label.setEllipsize(TextUtils.TruncateAt.END);
+                row.addView(label, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                if (hasSub) {
+                    ImageView arrow = new ImageView(context);
+                    arrow.setContentDescription("Submenu");
+                    arrow.setImageDrawable(createRightChevronDrawable(context, arrowColor));
+                    int iconSize = dpToPx(context, 14);
+                    LinearLayout.LayoutParams arrowLp = new LinearLayout.LayoutParams(iconSize, iconSize);
+                    arrowLp.setMarginStart(dpToPx(context, 18));
+                    row.addView(arrow, arrowLp);
+                }
+
+                final Runnable openSubmenu = new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!hasSub || subHolder == null) return;
+                        if (subHolder[0] != null) {
+                            try {
+                                subHolder[0].dismiss();
+                            } catch (Throwable ignored) {}
+                            subHolder[0] = null;
+                        }
+                        PopupWindow subPopup = buildDesktopMenuPopup(
+                                context, windowTokenAnchor, entry.subItems, false, dismissRoot, null);
+                        if (subPopup == null) return;
+                        subHolder[0] = subPopup;
+                        int[] rowLoc = new int[2];
+                        int[] cardLoc = new int[2];
+                        row.getLocationOnScreen(rowLoc);
+                        card.getLocationOnScreen(cardLoc);
+                        DisplayMetrics dm = context.getResources().getDisplayMetrics();
+                        int margin = dpToPx(context, 8);
+                        int overlap = dpToPx(context, 2);
+                        int rightX = cardLoc[0] + card.getWidth() - overlap;
+                        int leftX = cardLoc[0] - subPopup.getWidth() + overlap;
+                        int subX = (rightX + subPopup.getWidth() <= dm.widthPixels - margin)
+                                ? rightX
+                                : Math.max(margin, leftX);
+                        int maxSubY = Math.max(margin, dm.heightPixels - subPopup.getHeight() - margin);
+                        int subY = Math.max(margin, Math.min(rowLoc[1] - padV, maxSubY));
+                        try {
+                            subPopup.showAtLocation(windowTokenAnchor, Gravity.NO_GRAVITY, subX, subY);
+                        } catch (Throwable t) {
+                            XposedBridge.log(ModConfig.TAG + ": showDesktopSubmenu error: " + t);
+                        }
+                    }
+                };
+
+                row.setOnHoverListener(new View.OnHoverListener() {
+                    @Override
+                    public boolean onHover(View v, MotionEvent event) {
+                        int act = event.getActionMasked();
+                        if (act == MotionEvent.ACTION_HOVER_ENTER) {
+                            rowBase.setColor(hoverColor);
+                            if (subHolder != null) {
+                                if (hasSub) {
+                                    openSubmenu.run();
+                                } else if (subHolder[0] != null) {
+                                    try {
+                                        subHolder[0].dismiss();
+                                    } catch (Throwable ignored) {}
+                                    subHolder[0] = null;
+                                }
+                            }
+                        } else if (act == MotionEvent.ACTION_HOVER_EXIT) {
+                            rowBase.setColor(Color.TRANSPARENT);
+                        }
+                        return false;
+                    }
+                });
+
+                row.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (hasSub) {
+                            openSubmenu.run();
+                            return;
+                        }
+                        if (subHolder != null && subHolder[0] != null) {
+                            try {
+                                subHolder[0].dismiss();
+                            } catch (Throwable ignored) {}
+                            subHolder[0] = null;
+                        }
+                        try {
+                            dismissRoot.dismiss();
+                        } catch (Throwable ignored) {}
+                        if (entry.action != null) {
+                            entry.action.run();
+                        }
+                    }
+                });
+
+                listCol.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+
+            scroll.addView(listCol, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            card.addView(scroll, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            DisplayMetrics dm = context.getResources().getDisplayMetrics();
+            int maxW = Math.max(dpToPx(context, 220), dm.widthPixels - dpToPx(context, 24));
+            int maxH = Math.max(dpToPx(context, 160), dm.heightPixels - dpToPx(context, 32));
+            card.measure(
+                    View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST));
+            int panelW = Math.max(dpToPx(context, 196), Math.min(maxW, card.getMeasuredWidth()));
+            int panelH = Math.min(maxH, card.getMeasuredHeight());
+
+            popup.setContentView(card);
+            popup.setWidth(panelW);
+            popup.setHeight(panelH);
+            popup.setFocusable(focusable);
+            popup.setOutsideTouchable(focusable);
+            popup.setBackgroundDrawable(cardBg);
+            popup.setElevation(dpToPx(context, 10));
+            return popup;
+        }
+
+        private static Drawable createRightChevronDrawable(final Context context, final int color) {
+            return new Drawable() {
+                private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                {
+                    paint.setColor(color);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(Math.max(2f, dpToPx(context, 1.7f)));
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+                    paint.setStrokeJoin(Paint.Join.ROUND);
+                }
+
+                @Override
+                public void draw(Canvas canvas) {
+                    Rect b = getBounds();
+                    float w = b.width();
+                    float h = b.height();
+                    Path p = new Path();
+                    p.moveTo(b.left + w * 0.34f, b.top + h * 0.22f);
+                    p.lineTo(b.left + w * 0.68f, b.top + h * 0.50f);
+                    p.lineTo(b.left + w * 0.34f, b.top + h * 0.78f);
+                    canvas.drawPath(p, paint);
+                }
+
+                @Override
+                public void setAlpha(int alpha) {
+                    paint.setAlpha(alpha);
+                }
+
+                @Override
+                public void setColorFilter(android.graphics.ColorFilter cf) {
+                    paint.setColorFilter(cf);
+                }
+
+                @Override
+                public int getOpacity() {
+                    return android.graphics.PixelFormat.TRANSLUCENT;
+                }
+            };
         }
 
         private void createDesktopFileAndRenameInline(
