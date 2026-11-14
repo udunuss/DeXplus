@@ -834,20 +834,23 @@ public final class SystemUIWindowDecorHook {
                     return;
                 }
                 if (mode == 5 && CLIENT_FULLSCREEN_TASKS.remove(Integer.valueOf(taskId))) {
-                    Rect saved = LAST_FREEFORM_BOUNDS.get(Integer.valueOf(taskId));
-                    if (saved != null && !saved.isEmpty()) {
-                        Rect current = taskBounds(task);
-                        Rect full = displayBoundsFromController(param.thisObject, task);
-                        if (current == null || current.isEmpty() || (full != null && current.equals(full))) {
-                            Class<?> wctClass = Class.forName("android.window.WindowContainerTransaction",
-                                    false, param.thisObject.getClass().getClassLoader());
-                            Object wct = wctClass.getDeclaredConstructor().newInstance();
-                            Object token = field(task, "token");
-                            if (token != null) {
+                    Object token = field(task, "token");
+                    if (token != null) {
+                        Class<?> wctClass = Class.forName("android.window.WindowContainerTransaction",
+                                false, param.thisObject.getClass().getClassLoader());
+                        Object wct = wctClass.getDeclaredConstructor().newInstance();
+                        Rect saved = LAST_FREEFORM_BOUNDS.get(Integer.valueOf(taskId));
+                        if (saved != null && !saved.isEmpty()) {
+                            Rect current = taskBounds(task);
+                            Rect full = displayBoundsFromController(param.thisObject, task);
+                            if (current == null || current.isEmpty() || (full != null && current.equals(full))) {
                                 XposedHelpers.callMethod(wct, "setBounds", token, new Rect(saved));
-                                param.setResult(wct);
                             }
                         }
+                        // Force a hierarchy lifecycle pass on exit so underlying desktop
+                        // windows, Home, and wallpaper hidden during fullscreen become visible again.
+                        XposedHelpers.callMethod(wct, "reorder", token, Boolean.TRUE);
+                        param.setResult(wct);
                     }
                 }
             } catch (Throwable error) {
