@@ -12,10 +12,24 @@
 
 Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
+
+
+
+https://github.com/user-attachments/assets/e2592c10-9f5e-465f-a000-b518c6d268b6
+
+
+https://github.com/user-attachments/assets/6394d223-4b6f-4649-8b46-9fc2653cbc2d
+
+
+
+https://github.com/user-attachments/assets/af07b760-d09a-4b91-8765-b06dca87f027
+
+
+
+https://github.com/user-attachments/assets/a4313a31-2bb7-4126-aabb-d0ad80c24a40
+
 <img width="1514" height="1119" alt="general" src="https://github.com/user-attachments/assets/30daf46a-2851-4a49-be9f-5df1cd3836aa" />
 
-
-https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 
 
 ## Options
