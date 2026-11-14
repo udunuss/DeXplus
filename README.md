@@ -8,7 +8,7 @@
 > [!CAUTION]
 > Untested with Samsung DeX on external monitors. Using this module may break external DeX functionality.
 
-**Dex+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, improving the home-screen layout for desktop use, and adding extra window controls.
+**Dex+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, providing a Windows-style desktop with optional file-backed folders and shortcuts, and adding extra window controls.
 
 Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
@@ -35,33 +35,36 @@ https://github.com/user-attachments/assets/f60b2ff0-8023-46e8-9802-8d3bbb132ee5
 - **Use Standard Notification & Quick Settings Shade.** Taskbar notification and quick settings buttons open the full system shade instead of the compact popups.
 - **Show Search Button on Taskbar.** Shows or hides the Finder search button in the taskbar status area live.
 - **Apply Scaling to External Displays.** Also applies the taskbar icon and density scale on connected external monitors.
-- **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140%.
-- **Taskbar Height.** Height of the desktop taskbar (scales `task_bar_height_dex` and adjusts workspace bottom clearance). Default 100%. Range 75% to 135%.
+- **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140% (with a **Reset** button).
+- **Taskbar Height.** Height of the desktop taskbar (scales `task_bar_height_dex` and adjusts desktop bottom clearance). Default 100%. Range 75% to 135% (with a **Reset** button).
 
 
-### Desktop Workspace
+### Desktop
 
-- **Open Shortcuts in Resizable Windows.** Opens workspace shortcuts in freeform desktop windows.
-- **Free Grid Placement.** Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left.
-- **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it.
-- **Shortcut Icon Size.** Size of workspace icons and labels. Default 100%. Range 70% to 140%.
+- **Open Shortcuts in Resizable Windows.** Opens desktop shortcuts in freeform windows. Default on.
+- **Free Grid Placement.** Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left (also toggleable from the desktop right-click menu). Default on.
+- **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it. Default on.
+- **File-Based Desktop.** Uses a real folder on internal storage where each app/deep shortcut is stored as a `.dexsc` file and any folders, videos, images, APKs, or other files in that folder appear directly on the desktop. Default off.
+- **Desktop Folder Path.** Storage folder used when File-Based Desktop is enabled. Default `/storage/emulated/0/Desktop`.
+- **Desktop Icon Size.** Scales desktop icons and labels and automatically computes the grid columns and rows to fill available screen space. Default 100%. Range 70% to 140% (with a **Reset** button).
+- **Create Classic Icons in Desktop Folder / Reset Desktop Shortcuts.** Creates classic desktop icons for file-based mode on demand, or resets desktop shortcuts back to only the System Settings icon.
 
 ### Window Controls
 
 - **Hide Top Status Bar.** Hides the top status bar in desktop mode so windows can use that space.
-- **Drag Window to Top Edge to Maximize.** Dragging a window to the top edge maximizes it instead of leaving DeX.
-- **Fullscreen inside the window.** A video fills the window it is already in. The window is not resized, and DeX stays open.
+- **Drag Window to Top Edge to Maximize.** Dragging a window to the top edge maximizes it instead of leaving DeX. Maximized windows automatically get square corners (`0` radius).
+- **Fullscreen inside the window.** A video fills the window it is already in without resizing it. When turned off, system fullscreen stays inside DeX and cleanly restores desktop windows, icons, and wallpaper on exit.
 - **Allow All Apps in Resizable Windows.** Lets every installed app run in a freeform window and be resized.
 - **Always-on-Top Pin Button.** Adds a pin button that keeps a window above the others.
 - **Hide Fullscreen Button on Windowed Apps.** Hides the extra fullscreen button on normal and maximized windows.
 - **Long-Press Maximize for Fullscreen.** Hold Maximize or Restore to enter or leave immersive fullscreen for that window.
 - **Hide App Icon Dropdown Arrow.** Hides the arrow next to the app icon. The icon still opens its menu.
-- **Window corner radius.** Rounds floating window corners, including the thin outline. 0 is square. Range 0 to 48 dp (with a quick **Reset** chip to return to the system default).
+- **Window corner radius.** Rounds floating window corners, including the thin outline. 0 is square. Range 0 to 48 dp (with a quick **Reset** button to return to the system default).
 - **Enable Enhanced Window Menu.** Adds extra tools to the menu opened from the app icon.
 - **Window Opacity Slider.** Adds a transparency slider from 20% to 100% in that menu.
 - **Center & Keep Awake Buttons.** Adds buttons to center the window and keep the screen awake while it is visible.
 - **Show App Info Shortcut.** Replaces Remove from workspace with a button that opens the app's system info page.
-- **Default Window Opacity.** Starting opacity for windows you have not adjusted from the menu. Default 100%. Range 30% to 100%.
+- **Default Window Opacity.** Starting opacity for windows you have not adjusted from the menu. Default 100%. Range 30% to 100% (with a **Reset** button).
 
 Changes apply as soon as you toggle them.
 
@@ -78,13 +81,11 @@ Read the code before you install it. It runs inside One UI Home, System UI, the 
 
 ## What it does
 
-**Taskbar.** Shows the desktop taskbar on the built-in display, with a notification count, quick settings, calendar, and audio controls. Taskbar icon scale and height are adjustable. Notification and quick settings buttons can open the compact DeX panels or the normal system shade. Panel sizing uses the tablet density rather than an external-monitor density.
+**Taskbar.** Shows the desktop taskbar on the built-in display, with a live notification count badge, quick settings, battery/charging indicator, calendar, and audio controls. Taskbar icon scale and height are adjustable. Notification and quick settings buttons can open the compact DeX panels or the normal system shade. Panel sizing uses the tablet density rather than an external-monitor density.
 
-**Home screen.** Icon size picks the grid. Side, top, and bottom margins are adjustable. Bottom margin at 0% sits the icon grid on the taskbar. Page arrows and home-screen gestures can be locked while desktop mode is on.
+**Desktop.** Full-screen desktop icon grid that automatically computes columns and rows to fill the screen based on **Desktop Icon Size**. Supports marquee drag-box selection, **Shift** / **Ctrl** click multi-selection, dragging single or multiple icons across the grid, drag-and-drop from the One UI App Drawer, right-click context menus (including **Free Grid Placement** toggle and **Open Desktop folder in My Files**), automatic "Add to Home" shortcut redirection, Chrome/Edge deep shortcuts, and **File-Based Desktop** (`.dexsc` shortcuts plus real folders opened directly in My Files, `.apk` files with an Android badge that launch the package installer, and media/documents).
 
-**Workspace.** Optional full-screen shortcut grid instead of the normal home pages. Supports drag-and-drop from the App Drawer or across grid slots, optional free grid placement anywhere on the grid, general empty-space and icon right-click menus, searchable app picker, automatic "Add to Home" shortcut redirection, Chrome/deep shortcut launching, custom column/row counts and icon scaling, single or double click to open, and opening shortcuts in resizable windows.
-
-**Windows.** Title-bar back button for that window only. Pin to keep a window above others. Drag a maximized window by its title bar to restore it and keep moving it. Drag to the top edge can maximize instead of leaving DeX. Long-press maximize for immersive fullscreen. Fullscreen requests from an app can stay inside the current window. App-icon menu can include opacity, center, keep-awake, and app info. Window corner radius applies to floating windows and the thin outline. Default opacity applies to windows you have not adjusted individually.
+**Windows.** Title-bar back button for that window only. Pin to keep a window above others. Drag a maximized window by its title bar to restore it and keep moving it. Drag to the top edge to maximize with square corners instead of leaving DeX. Long-press maximize for immersive fullscreen. App fullscreen requests either stay inside the window or keep DeX active and cleanly restore the desktop on exit. App-icon menu can include opacity, center, keep-awake, and app info. Window corner radius applies to floating windows and the thin outline. Default opacity applies to windows you have not adjusted individually.
 
 **Status bar.** The top status bar can be hidden in desktop mode so windows use that space.
 
@@ -127,11 +128,13 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## Version
 
-`1.2.38-dex` (`versionCode` 10238)
+`1.2.46-dex` (`versionCode` 10246)
 
-### Highlights in `1.2.38-dex`
+### Highlights in `1.2.45-dex` – `1.2.46-dex`
 
-- **Dedicated Workspace:** Fixed empty-space right-click anywhere on the desktop, added **Free Grid Placement** to position icons freely on any grid cell, added direct drag-and-drop from the One UI App Drawer, removed redundant move/arrange-mode UI in favor of direct drag-and-drop, fixed Chrome/Edge pinned website shortcuts (`DEEP_SHORTCUT`) via `LauncherApps.startShortcut`, and updated **Wallpaper & style** to open Samsung's general Wallpaper & style settings (`com.samsung.intent.action.WALLPAPER_SETTING`).
+- **Browser Video Fullscreen & Square Maximized Corners:** Maximized windows now get square corners (`0` radius on decor and outline). With **Fullscreen inside the window** turned off, entering browser video fullscreen no longer exits DeX, and exiting fullscreen now immediately restores visibility of underlying desktop windows, icons, and wallpaper instead of showing a black desktop.
+- **Windows-Style Desktop & File-Based Desktop:** Removed the old Home Screen customization mode and manual column/row settings so the unified **Desktop** automatically fills available space from icon size, with **Free Grid Placement** and **Double-Click to Open Shortcuts** enabled by default and fresh installs starting with only the **Settings** icon. Added drag-box selection, **Shift**/**Ctrl** multi-select and multi-icon drag, right-click **Free Grid Placement** toggle, optional **File-Based Desktop** (`.dexsc` shortcuts plus real files, folders opening directly inside My Files, and `.apk` files with an Android badge that open the package installer), and **Reset** buttons on every slider.
+- **Taskbar & Context Menu Fixes:** Fixed notification count badge not updating until first click, prevented battery icon shrinking on dark-mode toggle or charging animation, and removed redundant context menu actions.
 
 ## License
 
