@@ -7,17 +7,20 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 
+import com.udunus.dexplus.util.InputDeviceHelper;
 import com.udunus.dexplus.util.ModConfig;
 
 import java.lang.reflect.Method;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * Hides Samsung Honeyboard's physical keyboard prediction/toolbar bar while Internal DeX
- * desktop effects are active. The soft-keyboard toolbar is left untouched.
+ * desktop effects are active, and prevents mice with keyboard HID descriptors from hiding the
+ * soft keyboard when no real physical keyboard is connected.
  */
 public final class HoneyboardHook {
     private static final String PHYSICAL_TOOLBAR = "SETTINGS_PHYSICAL_KEYBOARD_TOOLBAR";
@@ -25,6 +28,7 @@ public final class HoneyboardHook {
     private static volatile boolean effectsWatching = false;
     private static volatile boolean cachedEffectsActive = false;
     private static boolean loggedToolbar = false;
+    private static boolean loggedMouseFix = false;
 
     private HoneyboardHook() {}
 
@@ -53,6 +57,51 @@ public final class HoneyboardHook {
             XposedBridge.log(ModConfig.TAG + ": physical toolbar hook 1");
         } catch (Throwable t) {
             XposedBridge.log(ModConfig.TAG + ": could not hook physical toolbar: " + t);
+        }
+
+        hookMouseAccessoryKeyboard(lpparam.classLoader);
+    }
+
+    private static void hookMouseAccessoryKeyboard(ClassLoader classLoader) {
+        try {
+            Class<?> immClass = XposedHelpers.findClassIfExists(
+                    "android.view.inputmethod.InputMethodManager", classLoader);
+            if (immClass == null) {
+                return;
+            }
+            XC_MethodHook hook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Object result = param.getResult();
+                    boolean isBool = result instanceof Boolean;
+                    boolean isInt = result instanceof Integer;
+                    if (isBool && !Boolean.TRUE.equals(result)) {
+                        return;
+                    }
+                    if (isInt && ((Integer) result).intValue() == 0) {
+                        return;
+                    }
+                    if (!isBool && !isInt) {
+                        return;
+                    }
+                    Context context = resolveAppContext();
+                    if (context == null || !ModConfig.isModuleEnabled(context)) {
+                        return;
+                    }
+                    if (InputDeviceHelper.hasOnlyMouseAlphabeticKeyboards(context, null)) {
+                        param.setResult(isBool ? Boolean.FALSE : Integer.valueOf(0));
+                        if (!loggedMouseFix) {
+                            loggedMouseFix = true;
+                            XposedBridge.log(ModConfig.TAG
+                                    + ": suppressed accessory-keyboard flag for mouse-only setup");
+                        }
+                    }
+                }
+            };
+            XposedBridge.hookAllMethods(immClass, "semIsAccessoryKeyboard", hook);
+            XposedBridge.hookAllMethods(immClass, "isAccessoryKeyboardState", hook);
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": could not hook semIsAccessoryKeyboard: " + t);
         }
     }
 
@@ -86,7 +135,7 @@ public final class HoneyboardHook {
         }
     }
 
-    private static boolean shouldHideToolbar() {
+    private static Context resolveAppContext() {
         try {
             Context context = AndroidAppHelper.currentApplication();
             if (context == null) {
@@ -96,6 +145,15 @@ public final class HoneyboardHook {
                     context = (Context) app;
                 }
             }
+            return context;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean shouldHideToolbar() {
+        try {
+            Context context = resolveAppContext();
             if (context == null) return false;
             if (!ModConfig.isModuleEnabled(context)
                     || !ModConfig.getBoolean(context, ModConfig.KEY_HIDE_PHYSICAL_KB_TOOLBAR, true)) {

@@ -1,8 +1,12 @@
 package com.udunus.dexplus.hooks;
 
+import android.content.Context;
 import android.os.IBinder;
 
+import com.udunus.dexplus.util.InputDeviceHelper;
 import com.udunus.dexplus.util.ModConfig;
+
+import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -11,11 +15,14 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class FrameworkDexHook {
     private static final int FULLSCREEN_MODE_REQUEST_ENTER = 1;
+    private static final int HW_KB_USB_OR_POGO_MASK = 0x04 | 0x10 | 0x20 | 0x40;
     private static volatile boolean loggedInside;
+    private static volatile boolean loggedMouseKeyboard;
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
         hookVideoFullscreen(cl);
+        hookInputMethodMouseKeyboard(cl);
 
         try {
             final Class<?> activityRecordClass = XposedHelpers.findClassIfExists(
@@ -131,6 +138,75 @@ public final class FrameworkDexHook {
         } catch (Throwable error) {
             XposedBridge.log(ModConfig.TAG + ": could not keep video fullscreen in the window: " + error);
         }
+    }
+
+    private static void hookInputMethodMouseKeyboard(ClassLoader cl) {
+        try {
+            Class<?> immsClass = XposedHelpers.findClassIfExists(
+                    "com.android.server.inputmethod.InputMethodManagerService", cl);
+            if (immsClass == null) {
+                return;
+            }
+            XposedBridge.hookAllMethods(immsClass, "checkBlocklistUsbKeyboardConnected",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (shouldClearMouseAccessoryResult(param.thisObject, param.getResult(), false)) {
+                                param.setResult(Integer.valueOf(0));
+                            }
+                        }
+                    });
+            XposedBridge.hookAllMethods(immsClass, "isAccessoryKeyboard",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (shouldClearMouseAccessoryResult(param.thisObject, param.getResult(), true)) {
+                                param.setResult(Integer.valueOf(0));
+                            }
+                        }
+                    });
+        } catch (Throwable error) {
+            XposedBridge.log(ModConfig.TAG + ": could not hook IMMS mouse keyboard check: " + error);
+        }
+    }
+
+    private static boolean shouldClearMouseAccessoryResult(
+            Object imms, Object result, boolean checkHwState) {
+        if (!(result instanceof Integer) || ((Integer) result).intValue() == 0 || imms == null) {
+            return false;
+        }
+        try {
+            ModConfig.reloadIfStale(null, 2000L);
+        } catch (Throwable ignored) {}
+        if (!ModConfig.isModuleEnabled(null)) {
+            return false;
+        }
+        try {
+            if (checkHwState) {
+                Object hwKb = XposedHelpers.getObjectField(imms, "mSamsungIMMSHWKeyboard");
+                if (hwKb != null) {
+                    int state = XposedHelpers.getIntField(hwKb, "keyboardState");
+                    if ((state & HW_KB_USB_OR_POGO_MASK) != 0) {
+                        return false;
+                    }
+                }
+            }
+            Object ctxObj = XposedHelpers.getObjectField(imms, "mContext");
+            if (!(ctxObj instanceof Context)) {
+                return false;
+            }
+            Object listObj = XposedHelpers.getObjectField(imms, "mKeyboardTypeMouseIdList");
+            List<?> allowList = listObj instanceof List<?> ? (List<?>) listObj : null;
+            if (InputDeviceHelper.hasOnlyMouseAlphabeticKeyboards((Context) ctxObj, allowList)) {
+                if (!loggedMouseKeyboard) {
+                    loggedMouseKeyboard = true;
+                    XposedBridge.log(ModConfig.TAG
+                            + ": cleared accessory keyboard state for mouse-only setup");
+                }
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     private static boolean forceResizableEnabled() {
