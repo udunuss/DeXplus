@@ -1618,6 +1618,15 @@ public final class LauncherCustomDesktopHook {
                         if (intent == null) return;
                         if (ModConfig.ACTION_DESKTOP_COMMAND.equals(intent.getAction())) {
                             String cmd = intent.getStringExtra("command");
+                            if ("launch_deep_shortcut".equals(cmd)) {
+                                String pkg = intent.getStringExtra("pkg");
+                                String shortcutId = intent.getStringExtra("shortcut_id");
+                                int userId = intent.getIntExtra("userid", -1);
+                                boolean freeform = intent.getBooleanExtra("freeform", true);
+                                ActivityOptions opts = makeLaunchOptions(freeform);
+                                startDeepShortcut(ctx, pkg, shortcutId, userId, opts);
+                                return;
+                            }
                             if ("reset_shortcuts".equals(cmd)) {
                                 resetDesktopShortcuts(ctx);
                             } else if ("import_legacy_shortcuts".equals(cmd)) {
@@ -2263,7 +2272,7 @@ public final class LauncherCustomDesktopHook {
             final Map<String, Long> expectedSizes = new HashMap<>();
             final Map<String, Integer> expectedDirCounts = new HashMap<>();
             for (DesktopShortcutItem di : session.draggedItems) {
-                if (di == null || !di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+                if (di == null || di.backingFile == null || !di.backingFile.exists()) continue;
                 candidates.add(di);
                 if (di.backingFile.isDirectory()) {
                     expectedDirCounts.put(di.storageKey, countRegularFiles(di.backingFile, 2000));
@@ -2483,7 +2492,7 @@ public final class LauncherCustomDesktopHook {
                 View cell = findCellByKey(k);
                 if (cell == null || !(cell.getTag() instanceof DesktopShortcutItem)) continue;
                 DesktopShortcutItem di = (DesktopShortcutItem) cell.getTag();
-                if (!di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+                if (di.backingFile == null || !di.backingFile.exists()) continue;
                 if (di.backingFile.equals(destDir)) continue;
                 if (di.isDirectory && isSameOrSubDirectory(di.backingFile, destDir)) continue;
                 out.add(di);
@@ -5177,7 +5186,7 @@ public final class LauncherCustomDesktopHook {
         LinkedHashSet<String> mimeSet = new LinkedHashSet<>();
 
         for (DesktopShortcutItem di : items) {
-            if (di == null || !di.isFileEntry || di.backingFile == null || !di.backingFile.exists()) continue;
+            if (di == null || di.backingFile == null || !di.backingFile.exists()) continue;
             Uri mediaUri = resolveMediaStoreUriForFile(ctx, di.backingFile);
             if (mediaUri == null) continue;
             uris.add(mediaUri);
@@ -6055,26 +6064,9 @@ public final class LauncherCustomDesktopHook {
                     if (TextUtils.isEmpty(scPkg)) {
                         scPkg = item.customPackage;
                     }
-                    if (!TextUtils.isEmpty(scPkg) && !TextUtils.isEmpty(shortcutId)) {
-                        LauncherApps la = (LauncherApps) context.getSystemService(Context.LAUNCHER_APPS_SERVICE);
-                        if (la != null) {
-                            UserHandle user = Process.myUserHandle();
-                            if (scIntent.hasExtra("userid")) {
-                                int uid = scIntent.getIntExtra("userid", -1);
-                                if (uid >= 0) {
-                                    try {
-                                        user = (UserHandle) XposedHelpers.callStaticMethod(
-                                                UserHandle.class, "of", uid);
-                                    } catch (Throwable ignored) {}
-                                }
-                            }
-                            try {
-                                la.startShortcut(scPkg, shortcutId, null, opts.toBundle(), user);
-                                return;
-                            } catch (Throwable t) {
-                                XposedBridge.log(ModConfig.TAG + ": startShortcut failed for " + scPkg + "/" + shortcutId + ": " + t);
-                            }
-                        }
+                    int uid = scIntent.hasExtra("userid") ? scIntent.getIntExtra("userid", -1) : -1;
+                    if (startDeepShortcut(context, scPkg, shortcutId, uid, opts)) {
+                        return;
                     }
                 }
             }
@@ -6092,6 +6084,31 @@ public final class LauncherCustomDesktopHook {
             context.startActivity(intent, opts.toBundle());
         } catch (Throwable t) {
             Toast.makeText(context, "Unable to launch " + item.label, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static boolean startDeepShortcut(
+            Context context,
+            String scPkg,
+            String shortcutId,
+            int userId,
+            ActivityOptions opts) {
+        if (context == null || TextUtils.isEmpty(scPkg) || TextUtils.isEmpty(shortcutId)) return false;
+        LauncherApps la = (LauncherApps) context.getSystemService(Context.LAUNCHER_APPS_SERVICE);
+        if (la == null) return false;
+        UserHandle user = Process.myUserHandle();
+        if (userId >= 0) {
+            try {
+                user = (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", userId);
+            } catch (Throwable ignored) {}
+        }
+        try {
+            Bundle optsBundle = opts != null ? opts.toBundle() : null;
+            la.startShortcut(scPkg, shortcutId, null, optsBundle, user);
+            return true;
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": startShortcut failed for " + scPkg + "/" + shortcutId + ": " + t);
+            return false;
         }
     }
 
