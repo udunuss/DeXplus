@@ -6,7 +6,9 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Process;
 import android.text.TextUtils;
 import android.widget.Toast;
@@ -48,7 +50,22 @@ public class DexscLauncherActivity extends Activity {
             return;
         }
         Uri uri = incoming.getData();
-        ParsedDexsc sc = readDexscFromUri(uri);
+        boolean[] permissionDenied = new boolean[1];
+        ParsedDexsc sc = readDexscFromUri(uri, permissionDenied);
+        if (permissionDenied[0]) {
+            Toast.makeText(this, "Allow 'All files access' for DeX+ to open .dexsc files",
+                    Toast.LENGTH_LONG).show();
+            try {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    Intent permIntent = new Intent(
+                            "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
+                            Uri.parse("package:" + getPackageName()));
+                    permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(permIntent);
+                }
+            } catch (Throwable ignored) {}
+            return;
+        }
         if (sc == null || (sc.component == null && sc.customIntent == null)) {
             Toast.makeText(this, "Invalid or empty DeX+ shortcut (.dexsc)", Toast.LENGTH_SHORT).show();
             return;
@@ -65,11 +82,14 @@ public class DexscLauncherActivity extends Activity {
         launchParsedShortcut(sc, freeform);
     }
 
-    private ParsedDexsc readDexscFromUri(Uri uri) {
+    private ParsedDexsc readDexscFromUri(Uri uri, boolean[] permissionDenied) {
         if (uri == null) return null;
         InputStream is = null;
+        SecurityException securityErr = null;
         try {
             is = getContentResolver().openInputStream(uri);
+        } catch (SecurityException se) {
+            securityErr = se;
         } catch (Throwable ignored) {}
 
         if (is == null && "file".equalsIgnoreCase(uri.getScheme()) && !TextUtils.isEmpty(uri.getPath())) {
@@ -78,9 +98,17 @@ public class DexscLauncherActivity extends Activity {
                 if (f.exists() && f.isFile()) {
                     is = new FileInputStream(f);
                 }
+            } catch (SecurityException se) {
+                securityErr = se;
             } catch (Throwable ignored) {}
         }
-        if (is == null) return null;
+        if (is == null) {
+            if (securityErr != null && Build.VERSION.SDK_INT >= 30
+                    && !isExternalStorageManagerCompat()) {
+                permissionDenied[0] = true;
+            }
+            return null;
+        }
 
         try (InputStream stream = is;
              BufferedReader br = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
@@ -188,6 +216,15 @@ public class DexscLauncherActivity extends Activity {
 
         String label = !TextUtils.isEmpty(sc.name) ? sc.name : "shortcut";
         Toast.makeText(this, "Unable to launch " + label, Toast.LENGTH_SHORT).show();
+    }
+
+    private static boolean isExternalStorageManagerCompat() {
+        try {
+            return Boolean.TRUE.equals(
+                    Environment.class.getMethod("isExternalStorageManager").invoke(null));
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     private static ActivityOptions makeLaunchOptions(boolean freeform) {
