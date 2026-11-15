@@ -2281,7 +2281,9 @@ public final class LauncherCustomDesktopHook {
                     final List<DesktopShortcutItem> verified = new ArrayList<>();
                     final long[] pollDelaysMs = new long[]{150L, 250L, 400L, 600L, 800L, 1200L, 1600L, 2000L, 2500L};
 
-                    long deadlineMs = SystemClock.uptimeMillis() + 60000L;
+                    final long startMs = SystemClock.uptimeMillis();
+                    final long maxWaitNoProgressMs = 25000L;
+                    final long deadlineMs = startMs + 60000L;
                     int step = 0;
                     while (!pending.isEmpty()) {
                         long waitMs = (step < pollDelaysMs.length) ? pollDelaysMs[step++] : 1500L;
@@ -2344,9 +2346,14 @@ public final class LauncherCustomDesktopHook {
                         }
 
                         if (pending.isEmpty()) break;
-                        // Stop after short window unless an active partial copy is still catching up.
-                        if (step >= pollDelaysMs.length && (!inProgressOut[0] || SystemClock.uptimeMillis() >= deadlineMs)) {
+                        long nowMs = SystemClock.uptimeMillis();
+                        if (nowMs >= deadlineMs) {
                             break;
+                        }
+                        if (step >= pollDelaysMs.length && !inProgressOut[0]) {
+                            if (!isMyFilesTaskActive(ctx) || (nowMs - startMs) >= maxWaitNoProgressMs) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -5287,6 +5294,19 @@ public final class LauncherCustomDesktopHook {
         return false;
     }
 
+    private static boolean isExcludedExternalCopyPath(
+            String path,
+            String srcPath,
+            String srcPrefix,
+            String desktopPath) {
+        if (TextUtils.isEmpty(path)) return true;
+        if (path.equals(srcPath) || path.startsWith(srcPrefix)) return true;
+        if (path.equals(desktopPath)) return true;
+        if (path.contains("/.Trash/") || path.contains("/.!%#@$/")) return true;
+        int lastSlash = path.lastIndexOf('/');
+        return lastSlash > 0 && desktopPath.equals(path.substring(0, lastSlash));
+    }
+
     private static boolean findVerifiedExternalCopy(
             Context ctx,
             File srcFile,
@@ -5298,7 +5318,8 @@ public final class LauncherCustomDesktopHook {
             boolean[] inProgressOut) {
         if (ctx == null || srcFile == null || TextUtils.isEmpty(desktopPath)) return false;
         String srcName = srcFile.getName();
-        String desktopPrefix = desktopPath.endsWith("/") ? desktopPath : (desktopPath + "/");
+        String srcPath = srcFile.getAbsolutePath();
+        String srcPrefix = srcPath.endsWith("/") ? srcPath : (srcPath + "/");
         Uri table = MediaStore.Files.getContentUri("external");
         String minStr = String.valueOf(minEpochSec);
         String selection = "(" + MediaStore.MediaColumns.DATE_ADDED + ">=?"
@@ -5314,9 +5335,7 @@ public final class LauncherCustomDesktopHook {
             if (c == null) return false;
             while (c.moveToNext()) {
                 String dataPath = c.getString(0);
-                if (TextUtils.isEmpty(dataPath)
-                        || dataPath.equals(desktopPath)
-                        || dataPath.startsWith(desktopPrefix)) {
+                if (isExcludedExternalCopyPath(dataPath, srcPath, srcPrefix, desktopPath)) {
                     continue;
                 }
                 File dest = new File(dataPath);
@@ -5335,7 +5354,7 @@ public final class LauncherCustomDesktopHook {
                     File cur = dest;
                     for (int depth = 0; cur != null && depth < 6; depth++, cur = cur.getParentFile()) {
                         String curPath = cur.getAbsolutePath();
-                        if (curPath.equals(desktopPath) || curPath.startsWith(desktopPrefix)) break;
+                        if (isExcludedExternalCopyPath(curPath, srcPath, srcPrefix, desktopPath)) break;
                         if (cur.isDirectory() && matchesCopiedEntryName(srcName, cur.getName(), true)) {
                             if (expectedDirCount <= 0
                                     || countRegularFiles(cur, expectedDirCount + 1) >= expectedDirCount) {
