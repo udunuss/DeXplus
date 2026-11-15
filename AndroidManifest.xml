@@ -94,6 +94,8 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:mimeType="dexplus/shortcut" />
+                <data android:scheme="file" android:mimeType="dexplus/shortcut" />
                 <data android:scheme="content" android:mimeType="application/x-dexplus-shortcut" />
                 <data android:scheme="file" android:mimeType="application/x-dexplus-shortcut" />
             </intent-filter>

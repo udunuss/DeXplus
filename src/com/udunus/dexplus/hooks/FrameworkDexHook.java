@@ -2,15 +2,23 @@ package com.udunus.dexplus.hooks;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.IBinder;
+import android.os.PatternMatcher;
 import android.os.SystemClock;
 
 import com.udunus.dexplus.util.InputDeviceHelper;
 import com.udunus.dexplus.util.ModConfig;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,7 +32,11 @@ public final class FrameworkDexHook {
     private static final int FULLSCREEN_MODE_REQUEST_ENTER = 1;
     private static final int HW_KB_USB_OR_POGO_MASK = 0x04 | 0x10 | 0x20 | 0x40;
     private static final String DEXSC_EXT = ".dexsc";
-    private static final String DEXSC_MIME_TYPE = "application/x-dexplus-shortcut";
+    private static final String DEXSC_MIME_TYPE = "dexplus/shortcut";
+    private static final String LEGACY_DEXSC_MIME_TYPE = "application/x-dexplus-shortcut";
+    private static final long GET_RESOLVED_FILTER_FLAG = PackageManager.GET_RESOLVED_FILTER;
+    private static final Map<Object, Long> DEXSC_ORIG_FLAGS =
+            Collections.synchronizedMap(new IdentityHashMap<Object, Long>());
     private static final long MEDIA_DEXSC_CACHE_TTL_MS = 10_000L;
     private static final int MEDIA_DEXSC_CACHE_MAX_ENTRIES = 64;
     private static final ThreadLocal<Boolean> RESOLVING_DEXSC_URI = new ThreadLocal<>();
@@ -271,7 +283,8 @@ public final class FrameworkDexHook {
      * content://media/external/file/<id> URI for unknown extensions like .dexsc,
      * which Android's IntentFilter rejects before matching manifest filters.
      * Rewrites qualifying .dexsc VIEW resolutions in system_server to DeX+'s
-     * explicit MIME type so both queryIntentActivities and startActivity match.
+     * custom MIME type and excludes wildcard MIME handlers unless they explicitly
+     * declare .dexsc support.
      */
     private static void hookDexscIntentResolution(ClassLoader cl) {
         try {
@@ -282,7 +295,25 @@ public final class FrameworkDexHook {
                         new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
-                                maybeRewriteDexscResolution(param, 0, 1);
+                                boolean isDexsc = maybeRewriteDexscResolution(param, 0, 1);
+                                if (isDexsc && param.args != null && param.args.length > 2
+                                        && param.args[2] instanceof Long) {
+                                    long origFlags = ((Long) param.args[2]).longValue();
+                                    DEXSC_ORIG_FLAGS.put(param, Long.valueOf(origFlags));
+                                    if ((origFlags & GET_RESOLVED_FILTER_FLAG) == 0L) {
+                                        param.args[2] = Long.valueOf(origFlags | GET_RESOLVED_FILTER_FLAG);
+                                    }
+                                }
+                            }
+
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Long origObj = DEXSC_ORIG_FLAGS.remove(param);
+                                if (origObj == null) {
+                                    return;
+                                }
+                                long origFlags = origObj.longValue();
+                                filterWildcardDexscResults(param, (origFlags & GET_RESOLVED_FILTER_FLAG) != 0L);
                             }
                         });
             }
@@ -315,41 +346,41 @@ public final class FrameworkDexHook {
         }
     }
 
-    private static void maybeRewriteDexscResolution(
+    private static boolean maybeRewriteDexscResolution(
             XC_MethodHook.MethodHookParam param, int intentIdx, int typeIdx) {
         if (param.args == null || param.args.length <= Math.max(intentIdx, typeIdx)) {
-            return;
+            return false;
         }
         if (!(param.args[intentIdx] instanceof Intent)) {
-            return;
+            return false;
         }
         final Intent intent = (Intent) param.args[intentIdx];
         if (intent.getComponent() != null || !Intent.ACTION_VIEW.equals(intent.getAction())) {
-            return;
-        }
-        final Uri data = intent.getData();
-        if (data == null) {
-            return;
+            return false;
         }
         final Object typeObj = param.args[typeIdx];
         final String resolvedType = typeObj instanceof String ? (String) typeObj : null;
-        if (!isAmbiguousMimeType(resolvedType)) {
-            return;
+        if (DEXSC_MIME_TYPE.equals(resolvedType) || LEGACY_DEXSC_MIME_TYPE.equals(resolvedType)) {
+            return isDexscIntentHookEnabled();
+        }
+        final Uri data = intent.getData();
+        if (data == null || !isAmbiguousMimeType(resolvedType)) {
+            return false;
         }
         if (Boolean.TRUE.equals(RESOLVING_DEXSC_URI.get())) {
-            return;
+            return false;
         }
 
         final boolean directDexscPath = isDexscPathUri(data);
         final boolean mediaFileUri = !directDexscPath && isMediaStoreFileUri(data);
         if (!directDexscPath && !mediaFileUri) {
-            return;
+            return false;
         }
         if (!isDexscIntentHookEnabled()) {
-            return;
+            return false;
         }
         if (!directDexscPath && !isMediaStoreDexscUri(data)) {
-            return;
+            return false;
         }
 
         param.args[typeIdx] = DEXSC_MIME_TYPE;
@@ -358,6 +389,57 @@ public final class FrameworkDexHook {
             loggedDexscIntentRewrite = true;
             XposedBridge.log(ModConfig.TAG + ": resolved .dexsc VIEW intent to " + DEXSC_MIME_TYPE);
         }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void filterWildcardDexscResults(
+            XC_MethodHook.MethodHookParam param, boolean keepResolvedFilter) {
+        Object resultObj = param.getResult();
+        if (!(resultObj instanceof List<?>)) {
+            return;
+        }
+        List<ResolveInfo> list = (List<ResolveInfo>) resultObj;
+        if (list.isEmpty()) {
+            return;
+        }
+        List<ResolveInfo> filtered = new ArrayList<>(list.size());
+        for (int i = 0; i < list.size(); i++) {
+            ResolveInfo ri = list.get(i);
+            if (ri == null) {
+                continue;
+            }
+            if (ri.filter != null && !isExplicitDexscFilter(ri.filter)) {
+                continue;
+            }
+            if (!keepResolvedFilter) {
+                ri.filter = null;
+            }
+            filtered.add(ri);
+        }
+        if (filtered.size() != list.size()) {
+            param.setResult(filtered);
+        }
+    }
+
+    private static boolean isExplicitDexscFilter(IntentFilter filter) {
+        int typeCount = filter.countDataTypes();
+        for (int i = 0; i < typeCount; i++) {
+            String dt = filter.getDataType(i);
+            if (DEXSC_MIME_TYPE.equals(dt) || LEGACY_DEXSC_MIME_TYPE.equals(dt)) {
+                return true;
+            }
+        }
+        Iterator<PatternMatcher> paths = filter.pathsIterator();
+        if (paths != null) {
+            while (paths.hasNext()) {
+                PatternMatcher pm = paths.next();
+                if (pm != null && endsWithIgnoreCase(pm.getPath(), DEXSC_EXT)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isDexscIntentHookEnabled() {
