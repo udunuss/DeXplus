@@ -207,8 +207,13 @@ public final class LauncherDexTaskbarHook {
             Collections.newSetFromMap(new WeakHashMap<Class<?>, Boolean>());
     private static int cachedDexBarPx;
     private static final WeakHashMap<View, Integer> GROWN_ICONS = new WeakHashMap<View, Integer>();
+    private static volatile Runnable dexStateListener;
 
     private LauncherDexTaskbarHook() {}
+
+    public static void setDexStateListener(Runnable listener) {
+        dexStateListener = listener;
+    }
 
     public static boolean isInternalDexActive() {
         return dexOn();
@@ -271,14 +276,59 @@ public final class LauncherDexTaskbarHook {
         try {
             Object d = ctx.getClass().getMethod("getDisplay").invoke(ctx);
             if (d instanceof Display) {
-                int id = ((Display) d).getDisplayId();
-                return id == 0 || id == 1;
+                return isBuiltInDisplayObject(d);
             }
         } catch (Throwable ignored) {}
         return true;
     }
 
+    private static boolean isBuiltInDisplayObject(Object display) {
+        if (display == null) {
+            return false;
+        }
+        int id = displayIdOf(display);
+        if (id == Display.DEFAULT_DISPLAY) {
+            return true;
+        }
+        if (id < 0) {
+            return false;
+        }
+        try {
+            Object type = display.getClass().getMethod("getType").invoke(display);
+            if (type instanceof Integer) {
+                // Display.TYPE_INTERNAL == 1 (covers foldable cover/main internal screens)
+                return ((Integer) type).intValue() == 1;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static boolean isBuiltInDisplayId(int id) {
+        if (id == Display.DEFAULT_DISPLAY) {
+            return true;
+        }
+        if (id < 0) {
+            return false;
+        }
+        Context context = appContext;
+        if (context == null) {
+            return false;
+        }
+        try {
+            Object manager = context.getSystemService("display");
+            if (manager == null) {
+                return false;
+            }
+            Object display = manager.getClass().getMethod("getDisplay", int.class)
+                    .invoke(manager, Integer.valueOf(id));
+            return isBuiltInDisplayObject(display);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public static void install(final XC_LoadPackage.LoadPackageParam lpparam) {
+        LauncherClassResolver.resolve(lpparam.appInfo != null ? lpparam.appInfo.sourceDir : null);
         ClassLoader loader = lpparam.classLoader;
         hookDexSpace(loader, HONEY_SPACE);
         hookDexSpace(loader, COMBINED);
@@ -506,11 +556,11 @@ public final class LauncherDexTaskbarHook {
             String name = info.getClass().getName();
             if (HONEY_SPACE.equals(name)) {
                 int id = ((Integer) info.getClass().getMethod("getDisplayId").invoke(info)).intValue();
-                return id == 0 || id == 1;
+                return isBuiltInDisplayId(id);
             }
             if (COMBINED.equals(name)) {
                 int id = ((Integer) info.getClass().getMethod("getPrimaryDisplayId").invoke(info)).intValue();
-                return id == 0 || id == 1;
+                return isBuiltInDisplayId(id);
             }
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": display check failed: " + error);
@@ -534,8 +584,20 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static int wrapTaskbar(ClassLoader loader) {
-        int count = 0;
+        LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+        boolean useResolvedPkg = resolved != null && !resolved.taskbarPackageClasses.isEmpty();
+        ArrayList<String> names = new ArrayList<String>();
+        if (useResolvedPkg) {
+            names.addAll(resolved.taskbarPackageClasses);
+        }
         for (String name : TaskbarClasses.NAMES) {
+            if (useResolvedPkg && name.startsWith("O6.")) {
+                continue;
+            }
+            names.add(name);
+        }
+        int count = 0;
+        for (String name : names) {
             Class<?> type;
             try {
                 type = Class.forName(name, false, loader);
@@ -619,6 +681,12 @@ public final class LauncherDexTaskbarHook {
             XposedBridge.log(TAG + ": in-device DeX is " + (on ? "on" : "off"));
             persist(on);
             applyStatusBar();
+            Runnable listener = dexStateListener;
+            if (listener != null) {
+                try {
+                    listener.run();
+                } catch (Throwable ignored) {}
+            }
             if (previous != UNSET && taskbarSeen) {
                 restartLauncher();
             }
@@ -704,12 +772,23 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static boolean calledFromDexUi() {
+        LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+        Set<String> prefixes = (resolved != null && !resolved.dexUiPackagePrefixes.isEmpty())
+                ? resolved.dexUiPackagePrefixes : null;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
         int limit = stack.length < 36 ? stack.length : 36;
         for (int i = 0; i < limit; i++) {
             String name = stack[i].getClassName();
-            if (name.indexOf("taskbar") >= 0 || name.indexOf("dexpanel") >= 0
-                    || name.startsWith("p4.")
+            if (name.indexOf("taskbar") >= 0 || name.indexOf("dexpanel") >= 0) {
+                return true;
+            }
+            if (prefixes != null) {
+                for (String prefix : prefixes) {
+                    if (name.startsWith(prefix)) {
+                        return true;
+                    }
+                }
+            } else if (name.startsWith("p4.")
                     || name.startsWith("R6.") || name.startsWith("T6.")
                     || name.startsWith("J6.") || name.startsWith("O6.")) {
                 return true;
@@ -906,6 +985,13 @@ public final class LauncherDexTaskbarHook {
 
     private static void hookHomeGestures(ClassLoader loader) {
         // Block Home Screen swipe, edit-mode, pinch, and minus-one page controllers while Desktop is active
+        LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+        if (resolved != null && !resolved.touchControllerClasses.isEmpty()) {
+            for (String clsName : resolved.touchControllerClasses) {
+                hookGesture(loader, clsName);
+            }
+            return;
+        }
         hookGesture(loader, "Z3.a");
         hookGesture(loader, "G5.n");
         hookGesture(loader, "G5.c");
@@ -969,14 +1055,17 @@ public final class LauncherDexTaskbarHook {
             XposedBridge.log(TAG + ": could not watch the home UI: " + error);
         }
         try {
+            LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+            String keyHandler = (resolved != null && resolved.keyGestureHandlerClass != null)
+                    ? resolved.keyGestureHandlerClass : "j2.b";
             XposedHelpers.findAndHookMethod(
-                    "j2.b",
+                    keyHandler,
                     loader,
                     "handleKeyGestureEvent",
                     "android.hardware.input.KeyGestureEvent",
                     android.os.IBinder.class,
                     SUPER_KEY);
-            XposedBridge.log(TAG + ": super key hooked");
+            XposedBridge.log(TAG + ": super key hooked (" + keyHandler + ")");
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not hook the Super key: " + error);
         }
@@ -1053,8 +1142,24 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void hookPanelClicks(ClassLoader loader) {
+        LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+        String statusBindingCls = (resolved != null && resolved.statusPanelBindingClass != null)
+                ? resolved.statusPanelBindingClass : "J6.f";
+        String taskbarBindingCls = (resolved != null && resolved.taskbarBindingClass != null)
+                ? resolved.taskbarBindingClass : "J6.b";
+        String repoCls = (resolved != null && resolved.notificationRepoClass != null)
+                ? resolved.notificationRepoClass : "F4.h";
+        String countMethod = (resolved != null && resolved.notificationCountMethod != null)
+                ? resolved.notificationCountMethod : "j";
+        String publishMethod = (resolved != null && resolved.notificationPublishMethod != null)
+                ? resolved.notificationPublishMethod : "f";
+        String panelMgrCls = (resolved != null && resolved.dexPanelManagerClass != null)
+                ? resolved.dexPanelManagerClass : "p4.f";
+        String panelEnumCls = (resolved != null && resolved.dexPanelEnumClass != null)
+                ? resolved.dexPanelEnumClass : "p4.c";
+
         try {
-            XposedHelpers.findAndHookMethod("J6.f", loader, "executeBindings", new XC_MethodHook() {
+            XposedHelpers.findAndHookMethod(statusBindingCls, loader, "executeBindings", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     int attached = attachNamedClicks(
@@ -1073,7 +1178,7 @@ public final class LauncherDexTaskbarHook {
             XposedBridge.log(TAG + ": could not hook status clicks: " + error);
         }
         try {
-            XposedHelpers.findAndHookMethod("J6.b", loader, "executeBindings", new XC_MethodHook() {
+            XposedHelpers.findAndHookMethod(taskbarBindingCls, loader, "executeBindings", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     attachNamedClicks(
@@ -1081,9 +1186,8 @@ public final class LauncherDexTaskbarHook {
                             new String[] {"c", "f"},
                             new String[] {"v", "w"});
                     try {
-                        Object finderView = field(param.thisObject, "c");
-                        if (finderView instanceof View) {
-                            View fv = (View) finderView;
+                        View fv = findBindingViewByEntry(param.thisObject, "c", "finder");
+                        if (fv != null) {
                             finderButtonRef = new WeakReference<View>(fv);
                             fv.setVisibility((!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE);
                         }
@@ -1095,20 +1199,36 @@ public final class LauncherDexTaskbarHook {
         }
         try {
             XposedHelpers.findAndHookMethod(
-                    "J6.f", loader, "_internalCallbackOnClick", int.class, View.class, STATUS_CLICK);
+                    statusBindingCls, loader, "_internalCallbackOnClick", int.class, View.class, STATUS_CLICK);
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not watch status click: " + error);
         }
         try {
-            Class<?> repo = Class.forName("F4.h", false, loader);
+            Class<?> repo = Class.forName(repoCls, false, loader);
             int hooked = 0;
             for (Method method : repo.getDeclaredMethods()) {
-                if ("j".equals(method.getName()) && method.getParameterTypes().length == 1) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1) continue;
+                String mName = method.getName();
+                if (countMethod.equals(mName) && java.util.List.class.isAssignableFrom(params[0])) {
                     XposedBridge.hookMethod(method, NOTIFICATION_COUNT);
                     hooked++;
-                } else if ("f".equals(method.getName()) && method.getParameterTypes().length == 1) {
+                } else if (publishMethod.equals(mName) && params[0].isEnum()) {
                     XposedBridge.hookMethod(method, PUBLISH_NOTIFICATIONS);
                     hooked++;
+                }
+            }
+            if (hooked == 0) {
+                for (Method method : repo.getDeclaredMethods()) {
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params.length != 1) continue;
+                    if ("j".equals(method.getName())) {
+                        XposedBridge.hookMethod(method, NOTIFICATION_COUNT);
+                        hooked++;
+                    } else if ("f".equals(method.getName())) {
+                        XposedBridge.hookMethod(method, PUBLISH_NOTIFICATIONS);
+                        hooked++;
+                    }
                 }
             }
             XposedBridge.log(TAG + ": notification count hooks " + hooked);
@@ -1128,7 +1248,10 @@ public final class LauncherDexTaskbarHook {
                 } else if ("onNotificationPosted".equals(name)
                         || "onNotificationRemoved".equals(name)
                         || "onNotificationRankingUpdate".equals(name)
-                        || "f".equals(name)) {
+                        || "f".equals(name)
+                        || (method.getParameterTypes().length == 0
+                            && method.getReturnType() == void.class
+                            && !name.startsWith("on") && !name.startsWith("get") && !"b".equals(name))) {
                     XposedBridge.hookMethod(method, REFRESH_NOTIFICATION_COUNT);
                 }
             }
@@ -1138,29 +1261,45 @@ public final class LauncherDexTaskbarHook {
         }
         hookQuickSettings(loader);
         try {
-            XposedHelpers.findAndHookMethod("p4.f", loader, "b", "p4.c", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (taskbarModsOn() && statusPanelMode == 1
-                            && param.args != null && param.args.length > 0 && param.args[0] instanceof Enum) {
-                        String panelName = ((Enum<?>) param.args[0]).name();
-                        if ("NOTIFICATION".equals(panelName) || "QUICK_SETTINGS".equals(panelName)) {
-                            closeOpenDexPanels(param.thisObject);
-                            expandSystemShade("QUICK_SETTINGS".equals(panelName));
-                            param.setResult(null);
-                            return;
-                        }
+            Class<?> mgrType = Class.forName(panelMgrCls, false, loader);
+            Class<?> enumType = Class.forName(panelEnumCls, false, loader);
+            Method toggleMethod = null;
+            try {
+                toggleMethod = mgrType.getDeclaredMethod("b", enumType);
+            } catch (NoSuchMethodException ignored) {
+                for (Method candidate : mgrType.getDeclaredMethods()) {
+                    Class<?>[] params = candidate.getParameterTypes();
+                    if (params.length == 1 && params[0] == enumType && !"a".equals(candidate.getName())) {
+                        toggleMethod = candidate;
+                        break;
                     }
-                    DEX_UI.set(Boolean.TRUE);
-                    fillPanelList(param.thisObject);
-                    startPanelServices(param.thisObject);
                 }
+            }
+            if (toggleMethod != null) {
+                XposedBridge.hookMethod(toggleMethod, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (taskbarModsOn() && statusPanelMode == 1
+                                && param.args != null && param.args.length > 0 && param.args[0] instanceof Enum) {
+                            String panelName = ((Enum<?>) param.args[0]).name();
+                            if ("NOTIFICATION".equals(panelName) || "QUICK_SETTINGS".equals(panelName)) {
+                                closeOpenDexPanels(param.thisObject);
+                                expandSystemShade("QUICK_SETTINGS".equals(panelName));
+                                param.setResult(null);
+                                return;
+                            }
+                        }
+                        DEX_UI.set(Boolean.TRUE);
+                        fillPanelList(param.thisObject);
+                        startPanelServices(param.thisObject);
+                    }
 
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    DEX_UI.remove();
-                }
-            });
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        DEX_UI.remove();
+                    }
+                });
+            }
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not hook panel toggle: " + error);
         }
@@ -1177,16 +1316,19 @@ public final class LauncherDexTaskbarHook {
             if (!taskbarModsOn() || !(param.args[0] instanceof Integer)) {
                 return;
             }
-            // In J6.f._internalCallbackOnClick:
-            // key 1 = Accessibility, key 2 = ScreenCapture, key 3 = Volume (p4.c.h),
-            // key 4 = Notification (p4.c.c), key 5 = QuickSettings (p4.c.e), key 6 = Calendar (p4.c.f)
+            // key 1 = Accessibility, key 2 = ScreenCapture, key 3 = Volume,
+            // key 4 = Notification, key 5 = QuickSettings, key 6 = Calendar
             int key = ((Integer) param.args[0]).intValue();
-            if (statusPanelMode == 1 && (key == 4 || key == 5)) {
-                expandSystemShade(key == 5);
+            String entry = (param.args.length > 1 && param.args[1] instanceof View)
+                    ? entryName((View) param.args[1]) : null;
+            boolean isNotif = entry != null ? entry.contains("notif") : (key == 4);
+            boolean isQs = entry != null ? (entry.contains("quick") || entry.contains("setting")) : (key == 5);
+            if (statusPanelMode == 1 && (isNotif || isQs)) {
+                expandSystemShade(isQs);
                 param.setResult(null);
                 return;
             }
-            if (key == 4) {
+            if (isNotif) {
                 publishDexNotifications();
             }
         }
@@ -1195,7 +1337,7 @@ public final class LauncherDexTaskbarHook {
     private static void closeOpenDexPanels(Object manager) {
         if (manager == null) return;
         try {
-            Object map = field(manager, "i");
+            Object map = findPanelMap(manager);
             if (map instanceof Map) {
                 for (Object provider : ((Map<?, ?>) map).values()) {
                     if (provider == null) continue;
@@ -1307,10 +1449,22 @@ public final class LauncherDexTaskbarHook {
         Object[] items = active instanceof Object[] ? (Object[]) active : new Object[0];
         Method allow = null;
         for (Method method : listener.getClass().getDeclaredMethods()) {
-            if ("d".equals(method.getName()) && method.getParameterTypes().length == 1) {
+            Class<?>[] params = method.getParameterTypes();
+            if ("d".equals(method.getName()) && params.length == 1) {
                 allow = method;
                 allow.setAccessible(true);
                 break;
+            }
+        }
+        if (allow == null) {
+            for (Method method : listener.getClass().getDeclaredMethods()) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length == 1 && method.getReturnType() == boolean.class
+                        && StatusBarNotification.class.isAssignableFrom(params[0])) {
+                    allow = method;
+                    allow.setAccessible(true);
+                    break;
+                }
             }
         }
         ArrayList<Object> kept = new ArrayList<Object>();
@@ -1445,7 +1599,7 @@ public final class LauncherDexTaskbarHook {
         if (!taskbarModsOn()) {
             return;
         }
-        Object button = field(binding, "e");
+        View button = findBindingViewByEntry(binding, "e", "notif");
         if (!(button instanceof ViewGroup)) {
             return;
         }
@@ -1552,9 +1706,20 @@ public final class LauncherDexTaskbarHook {
             Class<?> type = Class.forName(
                     "com.honeyspace.ui.honeypots.dexpanel.quicksettings.viewmodel.QuickSettingViewModel",
                     false, loader);
+            int hooked = 0;
             for (Method method : type.getDeclaredMethods()) {
                 if ("b".equals(method.getName()) && method.getParameterTypes().length == 3) {
                     XposedBridge.hookMethod(method, SAFE_TILE_UPDATE);
+                    hooked++;
+                }
+            }
+            if (hooked == 0) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params.length == 3 && params[0] == type && params[1].getName().contains("Observable")) {
+                        XposedBridge.hookMethod(method, SAFE_TILE_UPDATE);
+                        hooked++;
+                    }
                 }
             }
         } catch (Throwable error) {
@@ -1593,18 +1758,34 @@ public final class LauncherDexTaskbarHook {
     };
 
     private static void hookBatteryDrawable(ClassLoader loader) {
+        LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+        String drawableCls = (resolved != null && resolved.batteryDrawableClass != null)
+                ? resolved.batteryDrawableClass : "R6.d";
+        String coroutineCls = (resolved != null && resolved.batteryCoroutineClass != null)
+                ? resolved.batteryCoroutineClass : "R6.b";
         try {
-            Class<?> type = Class.forName("R6.d", false, loader);
+            Class<?> type = Class.forName(drawableCls, false, loader);
+            int hooked = 0;
             for (Method method : type.getDeclaredMethods()) {
                 if ("g".equals(method.getName()) && method.getParameterTypes().length == 0) {
                     XposedBridge.hookMethod(method, WIDEN_BATTERY);
+                    hooked++;
+                }
+            }
+            if (hooked == 0) {
+                for (Method method : type.getDeclaredMethods()) {
+                    if (method.getParameterTypes().length == 0 && method.getReturnType() == void.class
+                            && !Modifier.isStatic(method.getModifiers())
+                            && !"getTAG".equals(method.getName())) {
+                        XposedBridge.hookMethod(method, WIDEN_BATTERY);
+                    }
                 }
             }
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": could not hook battery drawable: " + error);
         }
         try {
-            Class<?> coroutine = Class.forName("R6.b", false, loader);
+            Class<?> coroutine = Class.forName(coroutineCls, false, loader);
             for (Method method : coroutine.getDeclaredMethods()) {
                 if ("invokeSuspend".equals(method.getName())) {
                     XposedBridge.hookMethod(method, RESIZE_BATTERY_COROUTINE);
@@ -1644,7 +1825,10 @@ public final class LauncherDexTaskbarHook {
             if (!taskbarModsOn()) {
                 return;
             }
-            Object meter = field(param.thisObject, "f");
+            Object meter = findFieldByType(
+                    param.thisObject,
+                    "com.honeyspace.ui.honeypots.taskbar.presentation.battery.BatteryMeterView",
+                    "f");
             if (meter instanceof View) {
                 scheduleBatterySize((View) meter, true);
             }
@@ -1666,15 +1850,43 @@ public final class LauncherDexTaskbarHook {
     private static void widenBatteryDrawable(Object drawable) {
         try {
             Class<?> type = drawable.getClass();
-            Field widthField = type.getDeclaredField("r");
-            Field heightField = type.getDeclaredField("s");
-            Field stableField = type.getDeclaredField("u");
+            Field widthField = null;
+            Field heightField = null;
+            Field stableField = null;
+            try {
+                widthField = type.getDeclaredField("r");
+                heightField = type.getDeclaredField("s");
+                stableField = type.getDeclaredField("u");
+            } catch (NoSuchFieldException ignored) {}
+            if (widthField == null || widthField.getType() != int.class
+                    || heightField == null || heightField.getType() != int.class) {
+                int iw = ((Integer) type.getMethod("getIntrinsicWidth").invoke(drawable)).intValue();
+                int ih = ((Integer) type.getMethod("getIntrinsicHeight").invoke(drawable)).intValue();
+                if (iw <= 0 || ih <= 0) return;
+                widthField = null;
+                heightField = null;
+                stableField = null;
+                for (Field f : type.getDeclaredFields()) {
+                    if (f.getType() != int.class || Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    int val = f.getInt(drawable);
+                    if (val == iw && widthField == null) {
+                        widthField = f;
+                    } else if (val == ih && heightField == null) {
+                        heightField = f;
+                    }
+                }
+                if (widthField == null || heightField == null) return;
+            }
             widthField.setAccessible(true);
             heightField.setAccessible(true);
-            stableField.setAccessible(true);
+            if (stableField != null) {
+                stableField.setAccessible(true);
+            }
             int width = widthField.getInt(drawable);
             int height = heightField.getInt(drawable);
-            int stable = stableField.getInt(drawable);
+            int stable = (stableField != null && stableField.getType() == int.class)
+                    ? stableField.getInt(drawable) : 0;
             if (width <= 0 || height <= 0) {
                 return;
             }
@@ -1695,9 +1907,9 @@ public final class LauncherDexTaskbarHook {
         if (!taskbarModsOn()) {
             return;
         }
-        Object meter = field(field(binding, "p"), "f");
-        if (meter instanceof View) {
-            scheduleBatterySize((View) meter, false);
+        View meter = findBatteryMeterView(binding);
+        if (meter != null) {
+            scheduleBatterySize(meter, false);
         }
     }
 
@@ -1720,7 +1932,7 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         try {
-            Object image = field(meter, "c");
+            Object image = findFieldByType(meter, "android.widget.ImageView", "c");
             if (!(image instanceof View)) {
                 return;
             }
@@ -1805,7 +2017,7 @@ public final class LauncherDexTaskbarHook {
 
     private static void fillPanelList(Object manager) {
         try {
-            Object map = field(manager, "i");
+            Object map = findPanelMap(manager);
             if (!(map instanceof Map) || !((Map<?, ?>) map).isEmpty()) {
                 return;
             }
@@ -1824,7 +2036,11 @@ public final class LauncherDexTaskbarHook {
                 if (panel == null) {
                     continue;
                 }
-                Object key = panel.getClass().getMethod("g").invoke(panel);
+                Method keyMethod = findEnumGetter(panel.getClass(), "g");
+                if (keyMethod == null) {
+                    continue;
+                }
+                Object key = keyMethod.invoke(panel);
                 if (key == null) {
                     continue;
                 }
@@ -1847,7 +2063,7 @@ public final class LauncherDexTaskbarHook {
         int bound = 0;
         try {
             Object componentServices = field(manager, "componentServices");
-            Object running = field(manager, "j");
+            Object running = findServiceMap(manager);
             if (componentServices instanceof Map && running instanceof Map) {
                 @SuppressWarnings("unchecked")
                 Map<Object, Object> dest = (Map<Object, Object>) running;
@@ -1860,7 +2076,7 @@ public final class LauncherDexTaskbarHook {
                         continue;
                     }
                     try {
-                        Method keyOf = noArg(service.getClass(), "a");
+                        Method keyOf = findEnumGetter(service.getClass(), "a");
                         if (keyOf == null) {
                             continue;
                         }
@@ -1945,31 +2161,201 @@ public final class LauncherDexTaskbarHook {
 
     private static boolean armPanel(Object manager, Object panel, Object provider) throws Exception {
         ClassLoader loader = manager.getClass().getClassLoader();
-        Class<?> callbackType = Class.forName("n8.U", false, loader);
-        Constructor<?> ctor = null;
-        for (Constructor<?> candidate : callbackType.getDeclaredConstructors()) {
-            Class<?>[] params = candidate.getParameterTypes();
-            if (params.length == 3 && params[0] == int.class) {
-                ctor = candidate;
-                break;
+        Class<?> fn1Type = null;
+        try {
+            fn1Type = Class.forName("kotlin.jvm.functions.Function1", false, loader);
+        } catch (Throwable ignored) {}
+
+        Field target = null;
+        Class<?> callbackType = null;
+        // Fast-path: check field "f" first, then scan hierarchy for Function1 field.
+        Class<?> type = panel.getClass();
+        while (type != null && target == null) {
+            try {
+                Field f = type.getDeclaredField("f");
+                if (fn1Type == null || fn1Type.isAssignableFrom(f.getType())) {
+                    Constructor<?> c = find3ArgIntCtor(f.getType());
+                    if (c != null) {
+                        target = f;
+                        callbackType = f.getType();
+                        break;
+                    }
+                }
+            } catch (NoSuchFieldException ignored) {}
+            for (Field f : type.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (fn1Type != null && fn1Type.isAssignableFrom(f.getType())) {
+                    if (find3ArgIntCtor(f.getType()) != null) {
+                        target = f;
+                        callbackType = f.getType();
+                        break;
+                    }
+                }
             }
+            type = type.getSuperclass();
         }
+        if (target == null || callbackType == null) {
+            return false;
+        }
+        Constructor<?> ctor = find3ArgIntCtor(callbackType);
         if (ctor == null) {
             return false;
         }
         ctor.setAccessible(true);
         Object callback = ctor.newInstance(Integer.valueOf(5), manager, provider);
-        Class<?> type = panel.getClass();
-        while (type != null) {
-            try {
-                Field target = type.getDeclaredField("f");
-                if (target.getType() == callbackType) {
-                    target.setAccessible(true);
-                    target.set(panel, callback);
-                    return true;
-                }
-            } catch (NoSuchFieldException ignored) {}
+        target.setAccessible(true);
+        target.set(panel, callback);
+        return true;
+    }
+
+    private static Constructor<?> find3ArgIntCtor(Class<?> type) {
+        if (type == null) return null;
+        for (Constructor<?> candidate : type.getDeclaredConstructors()) {
+            Class<?>[] params = candidate.getParameterTypes();
+            if (params.length == 3 && params[0] == int.class) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static View findBindingViewByEntry(Object binding, String preferredField, String entrySubstring) {
+        Object preferred = field(binding, preferredField);
+        if (preferred instanceof View) {
+            String entry = entryName((View) preferred);
+            if (entry == null || entry.contains(entrySubstring)) {
+                return (View) preferred;
+            }
+        }
+        Class<?> type = binding.getClass();
+        while (type != null && !"androidx.databinding.ViewDataBinding".equals(type.getName())) {
+            for (Field f : type.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (!View.class.isAssignableFrom(f.getType())) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(binding);
+                    if (v instanceof View) {
+                        String entry = entryName((View) v);
+                        if (entry != null && entry.contains(entrySubstring)) {
+                            return (View) v;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
             type = type.getSuperclass();
+        }
+        return preferred instanceof View ? (View) preferred : null;
+    }
+
+    private static View findBatteryMeterView(Object binding) {
+        Object fast = field(field(binding, "p"), "f");
+        if (fast instanceof View && fast.getClass().getName().endsWith("BatteryMeterView")) {
+            return (View) fast;
+        }
+        Class<?> type = binding.getClass();
+        while (type != null && !"androidx.databinding.ViewDataBinding".equals(type.getName())) {
+            for (Field f : type.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                try {
+                    f.setAccessible(true);
+                    Object val = f.get(binding);
+                    if (val instanceof View && val.getClass().getName().endsWith("BatteryMeterView")) {
+                        return (View) val;
+                    }
+                    if (val != null && val.getClass().getSuperclass() != null
+                            && "androidx.databinding.ViewDataBinding".equals(val.getClass().getSuperclass().getName())) {
+                        for (Field nf : val.getClass().getDeclaredFields()) {
+                            if (Modifier.isStatic(nf.getModifiers())) continue;
+                            nf.setAccessible(true);
+                            Object nv = nf.get(val);
+                            if (nv instanceof View && nv.getClass().getName().endsWith("BatteryMeterView")) {
+                                return (View) nv;
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return fast instanceof View ? (View) fast : null;
+    }
+
+    private static Object findPanelMap(Object manager) {
+        Object fast = field(manager, "i");
+        if (fast instanceof Map) return fast;
+        return findNthLinkedHashMap(manager, 0);
+    }
+
+    private static Object findServiceMap(Object manager) {
+        Object fast = field(manager, "j");
+        if (fast instanceof Map) return fast;
+        return findNthLinkedHashMap(manager, 1);
+    }
+
+    private static Object findNthLinkedHashMap(Object target, int index) {
+        int seen = 0;
+        for (Field f : target.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(f.getModifiers())) continue;
+            if ("java.util.LinkedHashMap".equals(f.getType().getName())) {
+                if (seen == index) {
+                    try {
+                        f.setAccessible(true);
+                        return f.get(target);
+                    } catch (Throwable ignored) {}
+                }
+                seen++;
+            }
+        }
+        return null;
+    }
+
+    private static Method findEnumGetter(Class<?> type, String preferredName) {
+        Method preferred = noArg(type, preferredName);
+        if (preferred != null && preferred.getReturnType().isEnum()) {
+            return preferred;
+        }
+        Class<?> current = type;
+        while (current != null) {
+            for (Method m : current.getDeclaredMethods()) {
+                if (m.getParameterTypes().length == 0 && m.getReturnType().isEnum()
+                        && !Modifier.isStatic(m.getModifiers())) {
+                    m.setAccessible(true);
+                    return m;
+                }
+            }
+            current = current.getSuperclass();
+        }
+        return preferred;
+    }
+
+    private static Object findFieldByType(Object target, String typeName, String preferredField) {
+        if (target == null) return null;
+        Object fast = field(target, preferredField);
+        if (fast != null && isInstanceOfName(fast.getClass(), typeName)) {
+            return fast;
+        }
+        Class<?> type = target.getClass();
+        while (type != null) {
+            for (Field f : type.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(target);
+                    if (v != null && isInstanceOfName(v.getClass(), typeName)) {
+                        return v;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return fast;
+    }
+
+    private static boolean isInstanceOfName(Class<?> cls, String targetName) {
+        while (cls != null) {
+            if (targetName.equals(cls.getName())) return true;
+            cls = cls.getSuperclass();
         }
         return false;
     }
@@ -2302,10 +2688,10 @@ public final class LauncherDexTaskbarHook {
             if (!taskbarModsOn() || param.args == null || param.args.length == 0 || param.args[0] == null) {
                 return;
             }
-            int id = displayIdOf(param.args[0]);
-            if (id == 0 || id == 1 || id < 0) {
+            if (isBuiltInDisplayObject(param.args[0]) || displayIdOf(param.args[0]) < 0) {
                 return;
             }
+            int id = displayIdOf(param.args[0]);
             Object replacement = builtInDisplayObject();
             if (replacement == null) {
                 return;
@@ -2325,7 +2711,7 @@ public final class LauncherDexTaskbarHook {
                 return;
             }
             int id = ((Integer) param.args[0]).intValue();
-            if (id == 0 || id == 1) {
+            if (isBuiltInDisplayId(id)) {
                 return;
             }
             param.args[0] = Integer.valueOf(0);
@@ -2344,8 +2730,7 @@ public final class LauncherDexTaskbarHook {
                     continue;
                 }
                 if ("android.view.Display".equals(arg.getClass().getName())) {
-                    int id = displayIdOf(arg);
-                    if (id > 1) {
+                    if (!isBuiltInDisplayObject(arg)) {
                         Object replacement = builtInDisplayObject();
                         if (replacement != null) {
                             param.args[i] = replacement;
@@ -2472,10 +2857,18 @@ public final class LauncherDexTaskbarHook {
             }
             Method getDisplay = manager.getClass().getMethod("getDisplay", int.class);
             Object display = getDisplay.invoke(manager, Integer.valueOf(0));
-            if (display == null) {
-                display = getDisplay.invoke(manager, Integer.valueOf(1));
+            if (display != null) {
+                return display;
             }
-            return display;
+            Object displays = manager.getClass().getMethod("getDisplays").invoke(manager);
+            if (displays instanceof Object[]) {
+                for (Object d : (Object[]) displays) {
+                    if (isBuiltInDisplayObject(d)) {
+                        return d;
+                    }
+                }
+            }
+            return null;
         } catch (Throwable error) {
             return null;
         }

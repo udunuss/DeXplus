@@ -11,11 +11,13 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.util.Log;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -67,6 +69,16 @@ public final class ModConfig {
     public static final String KEY_DESKTOP_FILE_BASED = "desktop_file_based";
     public static final String KEY_DESKTOP_FOLDER_PATH = "desktop_folder_path";
     public static final String DEFAULT_DESKTOP_FOLDER_PATH = "/storage/emulated/0/Desktop";
+
+    public static String getDefaultDesktopFolderPath() {
+        try {
+            File ext = Environment.getExternalStorageDirectory();
+            if (ext != null) {
+                return new File(ext, "Desktop").getAbsolutePath();
+            }
+        } catch (Throwable ignored) {}
+        return DEFAULT_DESKTOP_FOLDER_PATH;
+    }
     public static final String KEY_DESKTOP_NEW_FILE_TYPES = "desktop_new_file_types";
     public static final String DEFAULT_DESKTOP_NEW_FILE_TYPES =
             "[{\"ext\":\"txt\",\"label\":\"Text Document\"}]";
@@ -116,7 +128,7 @@ public final class ModConfig {
         defaults.put(KEY_DESKTOP_FREEFORM_LAUNCH, true);
         defaults.put(KEY_DESKTOP_FREE_PLACEMENT, true);
         defaults.put(KEY_DESKTOP_FILE_BASED, false);
-        defaults.put(KEY_DESKTOP_FOLDER_PATH, DEFAULT_DESKTOP_FOLDER_PATH);
+        defaults.put(KEY_DESKTOP_FOLDER_PATH, getDefaultDesktopFolderPath());
         defaults.put(KEY_DESKTOP_NEW_FILE_TYPES, DEFAULT_DESKTOP_NEW_FILE_TYPES);
 
         defaults.put(KEY_HIDE_STATUS_BAR, true);

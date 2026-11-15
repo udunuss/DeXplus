@@ -598,7 +598,7 @@ public class SettingsActivity extends Activity {
         addFolderPathRow(wsCard,
                 "Desktop Folder Path",
                 ModConfig.KEY_DESKTOP_FOLDER_PATH,
-                ModConfig.DEFAULT_DESKTOP_FOLDER_PATH);
+                ModConfig.getDefaultDesktopFolderPath());
         page.addView(wsCard);
 
         addSectionLabel(page, "\"NEW\" MENU FILE TYPES");

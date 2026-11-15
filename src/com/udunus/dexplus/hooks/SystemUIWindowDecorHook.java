@@ -339,14 +339,12 @@ public final class SystemUIWindowDecorHook {
                         if (id != 0) {
                             anyResolved = true;
                             resolved[i] = id;
-                        } else {
-                            resolved[i] = SYSUI_ID_FALLBACKS[i];
                         }
                     }
                     if (anyResolved) {
                         cachedSysUiIds = resolved;
+                        ids = resolved;
                     }
-                    ids = resolved;
                 } catch (Throwable ignored) {}
             }
         }
@@ -647,12 +645,20 @@ public final class SystemUIWindowDecorHook {
 
     private static int hookTaskChangeFullscreenGuards(ClassLoader loader) {
         int hooked = 0;
-        String[] observerLambdas = {
-                "com.android.wm.shell.freeform.FreeformTaskTransitionObserver$$ExternalSyntheticLambda8",
-        };
-        for (String name : observerLambdas) {
+        String baseName = "com.android.wm.shell.freeform.FreeformTaskTransitionObserver$$ExternalSyntheticLambda";
+        for (int i = 0; i < 32; i++) {
             try {
-                Class<?> cls = Class.forName(name, false, loader);
+                Class<?> cls = Class.forName(baseName + i, false, loader);
+                boolean hasTransitionChangeField = false;
+                for (Field f : cls.getDeclaredFields()) {
+                    if ("android.window.TransitionInfo$Change".equals(f.getType().getName())) {
+                        hasTransitionChangeField = true;
+                        break;
+                    }
+                }
+                if (!hasTransitionChangeField) {
+                    continue;
+                }
                 for (Method method : cls.getDeclaredMethods()) {
                     if ("accept".equals(method.getName())) {
                         XposedBridge.hookMethod(method, MARK_CLIENT_FULLSCREEN_TASK);

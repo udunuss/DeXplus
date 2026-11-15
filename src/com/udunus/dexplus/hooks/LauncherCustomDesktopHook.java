@@ -156,11 +156,19 @@ public final class LauncherCustomDesktopHook {
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
+        LauncherClassResolver.resolve(lpparam.appInfo != null ? lpparam.appInfo.sourceDir : null);
 
         hookWorkspaceContainer(cl);
         hookInternalDexTransition(cl);
         hookAddToHomeRedirection(cl);
         hookHomeAndDragSupport(cl);
+
+        LauncherDexTaskbarHook.setDexStateListener(new Runnable() {
+            @Override
+            public void run() {
+                syncDesktopVisibilityOnMainThread();
+            }
+        });
 
         ModConfig.addChangeListener(new Runnable() {
             @Override
@@ -315,10 +323,16 @@ public final class LauncherCustomDesktopHook {
             XposedBridge.log(ModConfig.TAG + ": hook HomeView secondary click error: " + t);
         }
 
-        // Prevent One UI Home's HomeView context-click listener (LE5/e -> Customize/Widgets popup)
+        // Prevent One UI Home's HomeView context-click listener (Customize/Widgets popup)
         // from firing over Dedicated Workspace, and show our empty desktop menu instead.
         try {
-            Class<?> homeContextClickClass = XposedHelpers.findClassIfExists("E5.e", cl);
+            LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+            String contextClickClassName = (resolved != null && resolved.homeContextClickClass != null)
+                    ? resolved.homeContextClickClass : "E5.e";
+            Class<?> homeContextClickClass = XposedHelpers.findClassIfExists(contextClickClassName, cl);
+            if (homeContextClickClass == null && !"E5.e".equals(contextClickClassName)) {
+                homeContextClickClass = XposedHelpers.findClassIfExists("E5.e", cl);
+            }
             if (homeContextClickClass != null) {
                 XposedBridge.hookAllMethods(homeContextClickClass, "onContextClick", new XC_MethodHook() {
                     @Override
@@ -353,12 +367,19 @@ public final class LauncherCustomDesktopHook {
 
     private static void hookInternalDexTransition(final ClassLoader cl) {
         try {
-            final Class<?> o6cClass = XposedHelpers.findClassIfExists("O6.C", cl);
-            if (o6cClass != null) {
-                XposedHelpers.findAndHookMethod(
-                        o6cClass,
+            LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
+            java.util.List<String> targets = new java.util.ArrayList<String>();
+            if (resolved != null && !resolved.taskbarCoroutineClasses.isEmpty()) {
+                targets.addAll(resolved.taskbarCoroutineClasses);
+            } else {
+                targets.add("O6.C");
+            }
+            for (String className : targets) {
+                final Class<?> cls = XposedHelpers.findClassIfExists(className, cl);
+                if (cls == null) continue;
+                XposedBridge.hookAllMethods(
+                        cls,
                         "invokeSuspend",
-                        Object.class,
                         new XC_MethodHook() {
                             @Override
                             protected void afterHookedMethod(MethodHookParam param) {
@@ -3893,9 +3914,10 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static File getDesktopDirectory(Context context) {
-        String path = ModConfig.getString(context, ModConfig.KEY_DESKTOP_FOLDER_PATH, ModConfig.DEFAULT_DESKTOP_FOLDER_PATH);
+        String defaultPath = ModConfig.getDefaultDesktopFolderPath();
+        String path = ModConfig.getString(context, ModConfig.KEY_DESKTOP_FOLDER_PATH, defaultPath);
         if (TextUtils.isEmpty(path)) {
-            path = ModConfig.DEFAULT_DESKTOP_FOLDER_PATH;
+            path = defaultPath;
         }
         File dir = new File(path);
         if (!dir.exists()) {
@@ -3903,7 +3925,7 @@ public final class LauncherCustomDesktopHook {
             dir.mkdirs();
         }
         if (dir.isFile()) {
-            dir = new File(ModConfig.DEFAULT_DESKTOP_FOLDER_PATH);
+            dir = new File(defaultPath);
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
         }
