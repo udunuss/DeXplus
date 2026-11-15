@@ -1,5 +1,6 @@
 package com.udunus.dexplus.hooks;
 
+import android.content.ClipDescription;
 import android.content.Context;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
@@ -12,10 +13,12 @@ import android.net.Uri;
 import android.hardware.input.InputManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PersistableBundle;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
+import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -218,6 +221,7 @@ public final class SystemUIWindowDecorHook {
         hookDesktopStableBounds(lpparam.classLoader);
         hookTypingStatusInset(lpparam.classLoader);
         hookDesktopDrop(lpparam.classLoader);
+        hookDesktopDragOverlaySuppression(lpparam.classLoader);
         hookCaptionButtons(lpparam.classLoader);
         hookWindowPin(lpparam.classLoader);
         hookAppMenu(lpparam.classLoader);
@@ -1254,6 +1258,48 @@ public final class SystemUIWindowDecorHook {
                 loggedIndicatorMiss = true;
                 XposedBridge.log(TAG + ": could not hook desktop drop: " + error);
             }
+        }
+    }
+
+    /**
+     * Prevents WM Shell DragAndDropController from showing Samsung's "X Cancel" /
+     * "Open with" overlay on DeX+ Desktop external drags while keeping global drops
+     * into target app windows (e.g. Samsung My Files) intact.
+     */
+    private static void hookDesktopDragOverlaySuppression(ClassLoader loader) {
+        try {
+            Class<?> controllerClass = XposedHelpers.findClassIfExists(
+                    "com.android.wm.shell.draganddrop.DragAndDropController", loader);
+            if (controllerClass == null) {
+                return;
+            }
+            XposedBridge.hookAllMethods(controllerClass, "onDrag", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 2
+                            || !(param.args[1] instanceof DragEvent)) {
+                        return;
+                    }
+                    DragEvent event = (DragEvent) param.args[1];
+                    ClipDescription desc = event.getClipDescription();
+                    if (desc == null) {
+                        return;
+                    }
+                    PersistableBundle extras = desc.getExtras();
+                    if (extras == null || !extras.getBoolean("dexplus_desktop_drag", false)) {
+                        return;
+                    }
+                    try {
+                        ModConfig.reloadIfStale(systemUiContext, 2000L);
+                    } catch (Throwable ignored) {}
+                    if (!ModConfig.isModuleEnabled(systemUiContext)) {
+                        return;
+                    }
+                    param.setResult(Boolean.FALSE);
+                }
+            });
+        } catch (Throwable error) {
+            XposedBridge.log(TAG + ": could not hook DragAndDropController.onDrag: " + error);
         }
     }
 

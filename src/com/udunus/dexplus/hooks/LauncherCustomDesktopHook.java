@@ -5186,7 +5186,9 @@ public final class LauncherCustomDesktopHook {
         LinkedHashSet<String> mimeSet = new LinkedHashSet<>();
 
         for (DesktopShortcutItem di : items) {
-            if (di == null || di.backingFile == null || !di.backingFile.exists()) continue;
+            if (di == null || di.isDirectory || di.backingFile == null || !di.backingFile.isFile()) {
+                continue;
+            }
             Uri mediaUri = resolveMediaStoreUriForFile(ctx, di.backingFile);
             if (mediaUri == null) continue;
             uris.add(mediaUri);
@@ -5203,6 +5205,7 @@ public final class LauncherCustomDesktopHook {
             try {
                 PersistableBundle extras = new PersistableBundle();
                 extras.putString("path", files.get(0).getAbsolutePath());
+                extras.putBoolean("dexplus_desktop_drag", true);
                 desc.setExtras(extras);
             } catch (Throwable ignored) {}
         }
