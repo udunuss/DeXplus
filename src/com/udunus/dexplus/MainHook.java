@@ -4,6 +4,7 @@ import com.udunus.dexplus.hooks.FrameworkDexHook;
 import com.udunus.dexplus.hooks.HoneyboardHook;
 import com.udunus.dexplus.hooks.LauncherCustomDesktopHook;
 import com.udunus.dexplus.hooks.LauncherDexTaskbarHook;
+import com.udunus.dexplus.hooks.SystemUIPowerMenuHook;
 import com.udunus.dexplus.hooks.SystemUIWindowDecorHook;
 import com.udunus.dexplus.util.ModConfig;
 
@@ -50,6 +51,7 @@ public final class MainHook implements IXposedHookLoadPackage {
             }
             case "com.android.systemui": {
                 SystemUIWindowDecorHook.install(lpparam);
+                SystemUIPowerMenuHook.install(lpparam);
                 break;
             }
             case "com.samsung.android.honeyboard": {

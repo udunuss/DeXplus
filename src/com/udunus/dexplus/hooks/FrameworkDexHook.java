@@ -1,5 +1,6 @@
 package com.udunus.dexplus.hooks;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -8,8 +9,12 @@ import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PatternMatcher;
+import android.os.Process;
 import android.os.SystemClock;
 
 import com.udunus.dexplus.util.InputDeviceHelper;
@@ -50,12 +55,14 @@ public final class FrameworkDexHook {
     private static volatile boolean loggedInside;
     private static volatile boolean loggedMouseKeyboard;
     private static volatile boolean loggedDexscIntentRewrite;
+    private static volatile boolean powerReceiverRegistered;
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
         hookVideoFullscreen(cl);
         hookInputMethodMouseKeyboard(cl);
         hookDexscIntentResolution(cl);
+        hookAdvancedPowerActions(cl);
 
         try {
             final Class<?> activityRecordClass = XposedHelpers.findClassIfExists(
@@ -517,6 +524,140 @@ public final class FrameworkDexHook {
             MEDIA_DEXSC_CACHE.put(key, new CachedUriResult(isDexsc, SystemClock.uptimeMillis()));
         }
         return isDexsc;
+    }
+
+    /**
+     * Registers a privileged broadcast receiver inside system_server once AMS finishes booting
+     * so SystemUI's Advanced Power Menu can trigger protected reboot and soft-reboot actions.
+     */
+    private static void hookAdvancedPowerActions(final ClassLoader cl) {
+        try {
+            final Class<?> amsClass = XposedHelpers.findClassIfExists(
+                    "com.android.server.am.ActivityManagerService", cl);
+            if (amsClass == null) {
+                return;
+            }
+            XposedBridge.hookAllMethods(amsClass, "systemReady", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (powerReceiverRegistered) {
+                        return;
+                    }
+                    Context amsCtx = null;
+                    try {
+                        Object raw = XposedHelpers.getObjectField(param.thisObject, "mContext");
+                        if (raw instanceof Context) {
+                            amsCtx = (Context) raw;
+                        }
+                    } catch (Throwable ignored) {}
+                    if (amsCtx == null) {
+                        amsCtx = getSystemContext();
+                    }
+                    if (amsCtx != null) {
+                        registerPowerActionReceiver(amsCtx, cl);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": hookAdvancedPowerActions error: " + t);
+        }
+    }
+
+    private static void registerPowerActionReceiver(final Context ctx, final ClassLoader cl) {
+        synchronized (FrameworkDexHook.class) {
+            if (powerReceiverRegistered) {
+                return;
+            }
+            try {
+                ModConfig.ensureInitialized(ctx);
+                IntentFilter filter = new IntentFilter(ModConfig.ACTION_POWER_ACTION);
+                BroadcastReceiver receiver = new BroadcastReceiver() {
+                    @Override
+                    public void onReceive(Context receiverCtx, Intent intent) {
+                        if (intent == null) {
+                            return;
+                        }
+                        String action = intent.getStringExtra(ModConfig.EXTRA_POWER_ACTION);
+                        if (action == null || action.isEmpty()) {
+                            return;
+                        }
+                        Context cfgCtx = receiverCtx != null ? receiverCtx : ctx;
+                        ModConfig.reload(cfgCtx);
+                        if (!ModConfig.isModuleEnabled(cfgCtx)
+                                || !ModConfig.isAdvancedPowerMenuEnabled(cfgCtx)) {
+                            return;
+                        }
+                        executePowerAction(ctx, cl, action);
+                    }
+                };
+                if (Build.VERSION.SDK_INT >= 33) {
+                    ctx.registerReceiver(receiver, filter, "android.permission.DEVICE_POWER",
+                            null, 2 /* RECEIVER_EXPORTED */);
+                } else {
+                    ctx.registerReceiver(receiver, filter, "android.permission.DEVICE_POWER", null);
+                }
+                powerReceiverRegistered = true;
+                XposedBridge.log(ModConfig.TAG + ": registered Advanced Power Menu receiver in system_server");
+            } catch (Throwable t) {
+                XposedBridge.log(ModConfig.TAG + ": registerPowerActionReceiver error: " + t);
+            }
+        }
+    }
+
+    private static void executePowerAction(final Context ctx, final ClassLoader cl, final String action) {
+        if ("soft_reboot".equals(action)) {
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Thread.sleep(180L);
+                    } catch (InterruptedException ignored) {}
+                    try {
+                        android.system.Os.class.getMethod("sync").invoke(null);
+                    } catch (Throwable ignored) {}
+                    XposedBridge.log(ModConfig.TAG + ": executing soft reboot (killing system_server)");
+                    Process.killProcess(Process.myPid());
+                }
+            }, "dexplus-soft-reboot");
+            t.start();
+            return;
+        }
+
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                Class<?> shutdownClass = XposedHelpers.findClassIfExists(
+                        "com.android.server.power.ShutdownThread", cl);
+                if (shutdownClass == null) {
+                    XposedBridge.log(ModConfig.TAG + ": ShutdownThread not found for power action: " + action);
+                    return;
+                }
+                final long token = Binder.clearCallingIdentity();
+                try {
+                    if ("safemode".equals(action)) {
+                        try {
+                            XposedHelpers.callStaticMethod(shutdownClass, "rebootSafeMode",
+                                    new Class<?>[]{Context.class}, ctx);
+                        } catch (Throwable ignored) {
+                            XposedHelpers.callStaticMethod(shutdownClass, "reboot",
+                                    new Class<?>[]{Context.class, String.class, boolean.class},
+                                    ctx, "safemode", false);
+                        }
+                    } else if ("recovery".equals(action)
+                            || "download".equals(action)
+                            || "bootloader".equals(action)) {
+                        XposedHelpers.callStaticMethod(shutdownClass, "reboot",
+                                new Class<?>[]{Context.class, String.class, boolean.class},
+                                ctx, action, false);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(ModConfig.TAG + ": executePowerAction(" + action + ") error: " + t);
+                } finally {
+                    Binder.restoreCallingIdentity(token);
+                }
+            }
+        });
     }
 
     private static Context getSystemContext() {

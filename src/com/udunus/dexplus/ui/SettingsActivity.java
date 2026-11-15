@@ -451,6 +451,10 @@ public class SettingsActivity extends Activity {
                 "Hide Physical Keyboard Toolbar",
                 "Hides the floating on-screen keyboard toolbar when a hardware keyboard is connected.",
                 ModConfig.KEY_HIDE_PHYSICAL_KB_TOOLBAR, true, false);
+        addSwitchRow(mainCard,
+                "Advanced Power Menu",
+                "Adds Soft Reboot, Recovery, Download Mode, Bootloader, Safe Mode, and Restart System UI to the power menu.",
+                ModConfig.KEY_ADVANCED_POWER_MENU, false, false);
         page.addView(mainCard);
 
         addSectionLabel(page, "SYSTEM ACTIONS");

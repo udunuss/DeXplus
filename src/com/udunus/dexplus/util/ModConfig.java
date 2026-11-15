@@ -44,6 +44,8 @@ public final class ModConfig {
     public static final String ACTION_PREFS_CHANGED = "com.udunus.dexplus.ACTION_PREFS_CHANGED";
     public static final String ACTION_DESKTOP_COMMAND = "com.udunus.dexplus.ACTION_DESKTOP_COMMAND";
     public static final String ACTION_RESTART_HOST = "com.udunus.dexplus.ACTION_RESTART_HOST";
+    public static final String ACTION_POWER_ACTION = "com.udunus.dexplus.ACTION_POWER_ACTION";
+    public static final String EXTRA_POWER_ACTION = "power_action";
     public static final String PERMISSION_RESTART_HOST = "com.udunus.dexplus.permission.RESTART_HOST";
     public static final String EXTRA_RESTART_TARGET = "target";
     public static final String EXTRA_RESET = "__dexplus_reset__";
@@ -52,6 +54,7 @@ public final class ModConfig {
     public static final String KEY_MODULE_ENABLED = "module_enabled";
     public static final String KEY_FORCE_INTERNAL_DEX = "force_internal_dex";
     public static final String KEY_HIDE_PHYSICAL_KB_TOOLBAR = "hide_physical_kb_toolbar";
+    public static final String KEY_ADVANCED_POWER_MENU = "advanced_power_menu";
 
     // Taskbar & Status Panel (Launcher)
     public static final String KEY_DEX_TASKBAR_ENABLED = "dex_taskbar_enabled";
@@ -115,6 +118,7 @@ public final class ModConfig {
         defaults.put(KEY_MODULE_ENABLED, true);
         defaults.put(KEY_FORCE_INTERNAL_DEX, false);
         defaults.put(KEY_HIDE_PHYSICAL_KB_TOOLBAR, true);
+        defaults.put(KEY_ADVANCED_POWER_MENU, false);
 
         defaults.put(KEY_DEX_TASKBAR_ENABLED, true);
         defaults.put(KEY_FIX_EXTERNAL_DEX_DPI, true);
@@ -465,6 +469,10 @@ public final class ModConfig {
 
     public static boolean isModuleEnabled(Context context) {
         return getBoolean(context, KEY_MODULE_ENABLED, true);
+    }
+
+    public static boolean isAdvancedPowerMenuEnabled(Context context) {
+        return getBoolean(context, KEY_ADVANCED_POWER_MENU, false);
     }
 
     /** Custom file template entry shown inside the Desktop "New" submenu. */
