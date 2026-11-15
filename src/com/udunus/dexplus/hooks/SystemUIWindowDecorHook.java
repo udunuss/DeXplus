@@ -1262,9 +1262,9 @@ public final class SystemUIWindowDecorHook {
     }
 
     /**
-     * Prevents WM Shell DragAndDropController from showing Samsung's "X Cancel" /
-     * "Open with" overlay on DeX+ Desktop external drags while keeping global drops
-     * into target app windows (e.g. Samsung My Files) intact.
+     * Suppresses WM Shell DragAndDropController (DropTargetLayout / DropResolverActivity)
+     * during DeX+ Desktop external drags while preserving global View.DRAG_FLAG_GLOBAL
+     * delivery to external target application windows.
      */
     private static void hookDesktopDragOverlaySuppression(ClassLoader loader) {
         try {

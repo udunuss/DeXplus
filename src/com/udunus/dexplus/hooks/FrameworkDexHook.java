@@ -279,8 +279,8 @@ public final class FrameworkDexHook {
     }
 
     /**
-     * Samsung My Files sends ACTION_VIEW with an empty MIME type ("") and a
-     * content://media/external/file/<id> URI for unknown extensions like .dexsc,
+     * File managers often dispatch ACTION_VIEW with an empty MIME type ("") and a
+     * content://media/external/file/<id> MediaStore URI for custom extensions like .dexsc,
      * which Android's IntentFilter rejects before matching manifest filters.
      * Rewrites qualifying .dexsc VIEW resolutions in system_server to DeX+'s
      * custom MIME type and excludes wildcard MIME handlers unless they explicitly

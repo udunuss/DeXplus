@@ -24,8 +24,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * Opens .dexsc DeX+ shortcut files from anywhere on the device (e.g., My Files,
- * folder browsers, or external file managers) and launches the target app or shortcut.
+ * Resolves .dexsc DeX+ shortcut files from content:// or file:// URIs and launches
+ * the target component, serialized intent, or deep shortcut.
  */
 public class DexscLauncherActivity extends Activity {
 
