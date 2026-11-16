@@ -17,6 +17,7 @@ import android.os.PersistableBundle;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
+import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.DragEvent;
 import android.view.Gravity;
@@ -43,6 +44,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -241,12 +243,29 @@ public final class SystemUIWindowDecorHook {
                 }
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (param.args != null && param.args.length > 8
+                                && param.args[2] != null && param.args[8] instanceof Boolean) {
+                            int taskId = taskIdFromTask(param.args[2]);
+                            if (isPendingImmersiveEnter(taskId)) {
+                                param.args[8] = Boolean.TRUE;
+                            }
+                        }
+                    }
+
+                    @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         recordFreeformBounds(param.thisObject, param.args);
                         if (param.args == null || param.args.length == 0 || param.args[0] == null) {
                             return;
                         }
                         Object params = param.args[0];
+                        if (param.args.length > 2 && param.args[2] != null
+                                && isPendingImmersiveEnter(taskIdFromTask(param.args[2]))) {
+                            try {
+                                XposedHelpers.setBooleanField(params, "mIsInsetSource", false);
+                            } catch (Throwable ignored) {}
+                        }
                         int current;
                         try {
                             current = XposedHelpers.getIntField(params, "mCornerRadius");
@@ -580,11 +599,26 @@ public final class SystemUIWindowDecorHook {
         }
         for (int i = 0; i < windows.size(); i++) {
             TaskChrome chrome = windows.get(i);
-            if (chrome != null && chrome.host != null) {
-                try {
-                    prepareCaption(chrome.host);
-                } catch (Throwable ignored) {}
+            if (chrome == null || chrome.host == null) {
+                continue;
             }
+            final Object decor = chrome.host;
+            try {
+                Object handlerObj = field(decor, "mHandler");
+                if (handlerObj instanceof Handler
+                        && ((Handler) handlerObj).getLooper() != Looper.myLooper()) {
+                    ((Handler) handlerObj).post(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                prepareCaption(decor);
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                } else {
+                    prepareCaption(decor);
+                }
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -1337,11 +1371,19 @@ public final class SystemUIWindowDecorHook {
             Class<?> immersive = Class.forName(
                     "com.android.wm.shell.desktopmode.DesktopImmersiveController", false, loader);
             for (Method method : immersive.getDeclaredMethods()) {
-                if ("moveTaskToImmersive".equals(method.getName())
-                        && method.getParameterTypes().length == 1) {
+                String name = method.getName();
+                int paramCount = method.getParameterTypes().length;
+                if ("moveTaskToImmersive".equals(name) && paramCount == 1) {
                     XposedBridge.hookMethod(method, MARK_IMMERSIVE_ENTER);
+                } else if (("moveTaskToNonImmersive".equals(name)
+                        || "exitImmersiveIfApplicable".equals(name))
+                        && paramCount >= 1) {
+                    XposedBridge.hookMethod(method, CLEAR_PENDING_IMMERSIVE);
+                } else if ("onTransitionReady".equals(name) && paramCount == 4) {
+                    XposedBridge.hookMethod(method, CLEAR_TRANSITION_IMMERSIVE);
                 }
             }
+            hookImmersiveRepoAndResizeSync(loader);
             Class<?> transaction = Class.forName(
                     "android.window.WindowContainerTransaction", false, loader);
             for (Method method : transaction.getDeclaredMethods()) {
@@ -1444,17 +1486,73 @@ public final class SystemUIWindowDecorHook {
         }
     };
 
+    private static final long PENDING_IMMERSIVE_WINDOW_MS = 2000L;
+    private static final ThreadLocal<Object> ENTERING_DECOR = new ThreadLocal<Object>();
+    private static final ThreadLocal<Integer> ENTERING_TASK_ID = new ThreadLocal<Integer>();
+    private static final ThreadLocal<Boolean> IMMERSIVE_WCT_BUILT = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<Object[]> TOGGLE_RESIZE_CTX = new ThreadLocal<Object[]>();
+    private static final ConcurrentHashMap<Integer, Long> PENDING_IMMERSIVE_ENTER_UNTIL =
+            new ConcurrentHashMap<Integer, Long>();
+    private static final ConcurrentHashMap<Integer, WeakReference<Object>> DECOR_BY_TASK_ID =
+            new ConcurrentHashMap<Integer, WeakReference<Object>>();
+
     private static final XC_MethodHook MARK_IMMERSIVE_ENTER = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
+            Object task = (param.args != null && param.args.length > 0) ? param.args[0] : null;
+            int taskId = taskIdFromTask(task);
+            markPendingImmersiveEnter(taskId);
             ENTERING_IMMERSIVE.set(Boolean.TRUE);
-            IMMERSIVE_BOUNDS.set(displayBounds(param.thisObject, param.args == null ? null : param.args[0]));
+            ENTERING_TASK_ID.set(taskId > 0 ? Integer.valueOf(taskId) : null);
+            IMMERSIVE_BOUNDS.set(displayBounds(param.thisObject, task));
+            setTaskFullImmersive(param.thisObject, task, true);
         }
 
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
             ENTERING_IMMERSIVE.set(null);
+            ENTERING_TASK_ID.set(null);
             IMMERSIVE_BOUNDS.set(null);
+        }
+    };
+
+    private static final XC_MethodHook CLEAR_PENDING_IMMERSIVE = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (param.args == null) {
+                return;
+            }
+            for (Object arg : param.args) {
+                int taskId = taskIdFromTask(arg);
+                if (taskId > 0) {
+                    clearPendingImmersiveEnter(taskId);
+                }
+            }
+        }
+    };
+
+    private static final XC_MethodHook CLEAR_TRANSITION_IMMERSIVE = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (param.args == null || param.args.length < 2 || param.args[1] == null) {
+                return;
+            }
+            try {
+                Object changesObj = XposedHelpers.callMethod(param.args[1], "getChanges");
+                if (!(changesObj instanceof List<?>)) {
+                    return;
+                }
+                for (Object change : (List<?>) changesObj) {
+                    if (change == null) {
+                        continue;
+                    }
+                    Object info = XposedHelpers.callMethod(change, "getTaskInfo");
+                    int taskId = taskIdFromTask(info);
+                    if (taskId > 0) {
+                        clearPendingImmersiveEnter(taskId);
+                    }
+                }
+            } catch (Throwable ignored) {}
         }
     };
 
@@ -1473,6 +1571,7 @@ public final class SystemUIWindowDecorHook {
             if (requested.isEmpty()) {
                 requested.set(full);
             }
+            IMMERSIVE_WCT_BUILT.set(Boolean.TRUE);
         }
 
         @Override
@@ -1483,15 +1582,303 @@ public final class SystemUIWindowDecorHook {
             try {
                 XposedHelpers.callMethod(param.thisObject, "setForceImmersiveChange", param.args[0]);
             } catch (Throwable ignored) {}
+            Object decor = ENTERING_DECOR.get();
+            if (decor == null) {
+                Integer tid = ENTERING_TASK_ID.get();
+                if (tid != null) {
+                    decor = cachedDecorForTask(tid.intValue());
+                }
+            }
+            removeCaptionInsets(decor, param.thisObject);
         }
     };
 
+    private static void hookImmersiveRepoAndResizeSync(ClassLoader loader) {
+        try {
+            Class<?> repo = Class.forName(
+                    "com.android.wm.shell.desktopmode.data.DesktopRepository", false, loader);
+            XC_MethodHook guardImmersiveReset = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 3) {
+                        return;
+                    }
+                    if (!(param.args[1] instanceof Integer) || !(param.args[2] instanceof Boolean)) {
+                        return;
+                    }
+                    int taskId = ((Integer) param.args[1]).intValue();
+                    boolean immersive = ((Boolean) param.args[2]).booleanValue();
+                    if (!immersive && isPendingImmersiveEnter(taskId)) {
+                        param.setResult(null);
+                    }
+                }
+            };
+            for (Method method : repo.getDeclaredMethods()) {
+                String name = method.getName();
+                if (("setTaskInFullImmersiveState".equals(name)
+                        || "setTaskInFullImmersiveStateInDesk".equals(name))
+                        && method.getParameterTypes().length == 3) {
+                    XposedBridge.hookMethod(method, guardImmersiveReset);
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            Class<?> windowDecor = Class.forName(
+                    "com.android.wm.shell.windowdecor.WindowDecoration", false, loader);
+            for (Method method : windowDecor.getDeclaredMethods()) {
+                if ("updateCaptionInsets".equals(method.getName())
+                        && method.getParameterTypes().length >= 1) {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object taskInfo = field(param.thisObject, "mTaskInfo");
+                            int taskId = taskIdFromTask(taskInfo);
+                            if (taskId > 0) {
+                                cacheDecorForTask(taskId, param.thisObject);
+                                if (isPendingImmersiveEnter(taskId)
+                                        && param.args != null && param.args.length > 0 && param.args[0] != null) {
+                                    try {
+                                        XposedHelpers.setBooleanField(param.args[0], "mIsInsetSource", false);
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            Class<?> tasksController = Class.forName(
+                    "com.android.wm.shell.desktopmode.DesktopTasksController", false, loader);
+            for (Method method : tasksController.getDeclaredMethods()) {
+                if ("toggleDesktopTaskSize".equals(method.getName())
+                        && method.getParameterTypes().length == 2) {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object task = (param.args != null && param.args.length > 0) ? param.args[0] : null;
+                            TOGGLE_RESIZE_CTX.set(new Object[]{param.thisObject, task});
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            TOGGLE_RESIZE_CTX.remove();
+                        }
+                    });
+                }
+            }
+            Class<?> toggleHandler = Class.forName(
+                    "com.android.wm.shell.desktopmode.ToggleResizeDesktopTaskTransitionHandler", false, loader);
+            for (Method method : toggleHandler.getDeclaredMethods()) {
+                if ("startTransition".equals(method.getName())
+                        && method.getParameterTypes().length >= 1) {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object[] ctx = TOGGLE_RESIZE_CTX.get();
+                            if (ctx == null || param.args == null || param.args.length == 0 || param.args[0] == null) {
+                                return;
+                            }
+                            syncCaptionInsetsForResize(ctx[0], ctx[1], param.args[0]);
+                        }
+                    });
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Attaches updated captionBar bounding rects to the resize transition WCT so
+     * window bounds and caption insets arrive together and Chromium browsers do not
+     * bounce AppHeader misalignment and exit HTML5 fullscreen.
+     */
+    private static void syncCaptionInsetsForResize(Object tasksController, Object task, Object wct) {
+        if (tasksController == null || task == null || wct == null) {
+            return;
+        }
+        try {
+            int taskId = taskIdFromTask(task);
+            if (taskId <= 0 || isPendingImmersiveEnter(taskId)) {
+                return;
+            }
+            Object token = field(task, "token");
+            if (token == null) {
+                return;
+            }
+            Object binder = XposedHelpers.callMethod(token, "asBinder");
+            Object changesObj = XposedHelpers.callMethod(wct, "getChanges");
+            if (!(changesObj instanceof Map<?, ?>)) {
+                return;
+            }
+            Object change = ((Map<?, ?>) changesObj).get(binder);
+            if (change == null) {
+                return;
+            }
+            Object cfg = XposedHelpers.callMethod(change, "getConfiguration");
+            Object winCfg = cfg == null ? null : field(cfg, "windowConfiguration");
+            Rect targetBounds = winCfg == null ? null : (Rect) XposedHelpers.callMethod(winCfg, "getBounds");
+            if (targetBounds == null || targetBounds.isEmpty()) {
+                return;
+            }
+            Object decor = resolveDecorForResize(tasksController, taskId);
+            if (decor == null) {
+                return;
+            }
+            Object oldInsets = XposedHelpers.getObjectField(decor, "mWindowDecorationInsets");
+            if (oldInsets == null || !XposedHelpers.getBooleanField(oldInsets, "shouldAddCaptionInset")) {
+                return;
+            }
+            Object oldFrame = XposedHelpers.getObjectField(oldInsets, "frame");
+            if (oldFrame == null || !oldFrame.getClass().getName().endsWith("$Relative")) {
+                return;
+            }
+            int captionH = ((Integer) XposedHelpers.callMethod(oldFrame, "getHeight")).intValue();
+            if (captionH <= 0) {
+                return;
+            }
+            List<Rect> newRects = shiftCaptionBoundingRects(oldInsets, task, targetBounds.width());
+            if (newRects == null) {
+                return;
+            }
+            Object owner = XposedHelpers.getObjectField(oldInsets, "owner");
+            int flags = XposedHelpers.getIntField(oldInsets, "flags");
+            boolean shouldSetAppBounds = XposedHelpers.getObjectField(oldInsets, "appBoundsExclusion") != null;
+            Rect captionRect = new Rect(0, 0, targetBounds.width(), captionH);
+            Rect exclusionRect = shouldSetAppBounds ? new Rect(targetBounds) : null;
+            Constructor<?> ctor = oldInsets.getClass().getConstructor(
+                    token.getClass(),
+                    Class.forName("android.os.Binder"),
+                    Rect.class,
+                    Rect.class,
+                    List.class,
+                    int.class,
+                    boolean.class,
+                    boolean.class);
+            Object newInsets = ctor.newInstance(
+                    token, owner, captionRect, exclusionRect, newRects,
+                    Integer.valueOf(flags), Boolean.TRUE, Boolean.valueOf(shouldSetAppBounds));
+            XposedHelpers.setObjectField(decor, "mWindowDecorationInsets", newInsets);
+            XposedHelpers.callMethod(newInsets, "update", wct);
+        } catch (Throwable ignored) {}
+    }
+
+    private static Object resolveDecorForResize(Object tasksController, int taskId) {
+        Object snapHandler = field(tasksController, "snapEventHandler");
+        Object decors = snapHandler == null ? null : field(snapHandler, "mWindowDecorByTaskId");
+        if (decors instanceof SparseArray<?>) {
+            Object raw = ((SparseArray<?>) decors).get(taskId);
+            if (raw != null) {
+                return unwrapWindowDecor(raw);
+            }
+        }
+        return cachedDecorForTask(taskId);
+    }
+
+    private static List<Rect> shiftCaptionBoundingRects(Object oldInsets, Object task, int newWidth) {
+        Object rawList = XposedHelpers.getObjectField(oldInsets, "boundingRects");
+        if (!(rawList instanceof List<?>)) {
+            return null;
+        }
+        List<?> oldList = (List<?>) rawList;
+        int oldWidth = 0;
+        for (Object item : oldList) {
+            if (item instanceof Rect && ((Rect) item).right > oldWidth) {
+                oldWidth = ((Rect) item).right;
+            }
+        }
+        if (oldWidth <= 0) {
+            try {
+                Object cfg = field(task, "configuration");
+                Object winCfg = cfg == null ? null : field(cfg, "windowConfiguration");
+                Rect b = winCfg == null ? null : (Rect) XposedHelpers.callMethod(winCfg, "getBounds");
+                if (b != null) {
+                    oldWidth = b.width();
+                }
+            } catch (Throwable ignored) {}
+        }
+        if (oldWidth <= 0 || oldWidth == newWidth) {
+            return null;
+        }
+        int deltaW = newWidth - oldWidth;
+        ArrayList<Rect> shifted = new ArrayList<Rect>(oldList.size());
+        for (Object item : oldList) {
+            if (!(item instanceof Rect)) {
+                continue;
+            }
+            Rect r = (Rect) item;
+            if (r.left > 0 && r.left >= oldWidth / 3) {
+                shifted.add(new Rect(r.left + deltaW, r.top, r.right + deltaW, r.bottom));
+            } else {
+                shifted.add(new Rect(r));
+            }
+        }
+        return shifted;
+    }
+
+    private static void markPendingImmersiveEnter(int taskId) {
+        if (taskId > 0) {
+            PENDING_IMMERSIVE_ENTER_UNTIL.put(
+                    Integer.valueOf(taskId),
+                    Long.valueOf(SystemClock.elapsedRealtime() + PENDING_IMMERSIVE_WINDOW_MS));
+        }
+    }
+
+    private static void clearPendingImmersiveEnter(int taskId) {
+        if (taskId > 0) {
+            PENDING_IMMERSIVE_ENTER_UNTIL.remove(Integer.valueOf(taskId));
+        }
+    }
+
+    private static boolean isPendingImmersiveEnter(int taskId) {
+        if (taskId <= 0) {
+            return false;
+        }
+        Integer key = Integer.valueOf(taskId);
+        Long until = PENDING_IMMERSIVE_ENTER_UNTIL.get(key);
+        if (until == null) {
+            return false;
+        }
+        if (SystemClock.elapsedRealtime() <= until.longValue()) {
+            return true;
+        }
+        PENDING_IMMERSIVE_ENTER_UNTIL.remove(key, until);
+        return false;
+    }
+
+    private static int taskIdFromTask(Object task) {
+        if (task == null) {
+            return -1;
+        }
+        try {
+            return task.getClass().getField("taskId").getInt(task);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static void cacheDecorForTask(int taskId, Object decor) {
+        if (taskId > 0 && decor != null) {
+            DECOR_BY_TASK_ID.put(Integer.valueOf(taskId), new WeakReference<Object>(decor));
+        }
+    }
+
+    private static Object cachedDecorForTask(int taskId) {
+        if (taskId <= 0) {
+            return null;
+        }
+        WeakReference<Object> ref = DECOR_BY_TASK_ID.get(Integer.valueOf(taskId));
+        return ref == null ? null : unwrapWindowDecor(ref.get());
+    }
+
     private static Rect displayBounds(Object controller, Object task) {
         try {
+            Object host = unwrapWindowDecor(controller);
             int displayId = task == null ? 0 : task.getClass().getField("displayId").getInt(task);
-            Object displayController = field(controller, "displayController");
+            Object displayController = field(host, "displayController");
             if (displayController == null) {
-                displayController = field(controller, "mDisplayController");
+                displayController = field(host, "mDisplayController");
             }
             if (displayController == null) {
                 return null;
@@ -1500,8 +1887,8 @@ public final class SystemUIWindowDecorHook {
             if (layout == null) {
                 return null;
             }
-            int width = ((Integer) XposedHelpers.callMethod(layout, "width")).intValue();
-            int height = ((Integer) XposedHelpers.callMethod(layout, "height")).intValue();
+            int width = readLayoutDim(layout, "mWidth", "width");
+            int height = readLayoutDim(layout, "mHeight", "height");
             if (width <= 0 || height <= 0) {
                 return null;
             }
@@ -1509,6 +1896,81 @@ public final class SystemUIWindowDecorHook {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static int readLayoutDim(Object layout, String fieldName, String methodName) {
+        try {
+            Field f = XposedHelpers.findFieldIfExists(layout.getClass(), fieldName);
+            if (f != null) {
+                return f.getInt(layout);
+            }
+        } catch (Throwable ignored) {}
+        try {
+            Object val = XposedHelpers.callMethod(layout, methodName);
+            if (val instanceof Integer) {
+                return ((Integer) val).intValue();
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static void setTaskFullImmersive(Object owner, Object task, boolean immersive) {
+        if (owner == null || task == null) {
+            return;
+        }
+        try {
+            Object host = unwrapWindowDecor(owner);
+            Object repos = field(host, "desktopUserRepositories");
+            if (repos == null) {
+                repos = field(host, "mDesktopUserRepositories");
+            }
+            if (repos == null) {
+                return;
+            }
+            int displayId = task.getClass().getField("displayId").getInt(task);
+            int taskId = task.getClass().getField("taskId").getInt(task);
+            Object repo = null;
+            try {
+                int userId = task.getClass().getField("userId").getInt(task);
+                repo = XposedHelpers.callMethod(repos, "getProfile", Integer.valueOf(userId));
+            } catch (Throwable ignored) {}
+            if (repo == null) {
+                repo = XposedHelpers.callMethod(repos, "getCurrent");
+            }
+            if (repo != null) {
+                XposedHelpers.callMethod(repo, "setTaskInFullImmersiveState",
+                        Integer.valueOf(displayId), Integer.valueOf(taskId), Boolean.valueOf(immersive));
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static void removeCaptionInsets(Object decor, Object wct) {
+        if (decor == null || wct == null) {
+            return;
+        }
+        Object target = unwrapWindowDecor(decor);
+        try {
+            Object insets = XposedHelpers.getObjectField(target, "mWindowDecorationInsets");
+            if (insets != null) {
+                XposedHelpers.callMethod(insets, "remove", wct);
+                XposedHelpers.setObjectField(target, "mWindowDecorationInsets", null);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static Object unwrapWindowDecor(Object decor) {
+        if (decor == null) {
+            return null;
+        }
+        Object inner = field(decor, "desktopWindowDecor");
+        if (inner != null) {
+            return inner;
+        }
+        inner = field(decor, "defaultWindowDecor");
+        if (inner != null) {
+            return inner;
+        }
+        return decor;
     }
 
     private static boolean clearStatusHideForDrag() {
@@ -1683,8 +2145,20 @@ public final class SystemUIWindowDecorHook {
         }
         immersive.setAccessible(true);
         immersiveGuardUntil = SystemClock.elapsedRealtime() + 1600L;
-        immersive.invoke(actions, task);
-        commitImmersive(decor, task);
+        markPendingImmersiveEnter(taskIdFromTask(task));
+        ENTERING_DECOR.set(decor);
+        IMMERSIVE_WCT_BUILT.remove();
+        try {
+            immersive.invoke(actions, task);
+            if (!Boolean.TRUE.equals(IMMERSIVE_WCT_BUILT.get())) {
+                commitImmersive(decor, task);
+            } else {
+                setTaskFullImmersive(decor, task, true);
+            }
+        } finally {
+            ENTERING_DECOR.remove();
+            IMMERSIVE_WCT_BUILT.remove();
+        }
         return true;
     }
 
@@ -1756,12 +2230,14 @@ public final class SystemUIWindowDecorHook {
 
     private static void commitImmersive(Object decor, Object task) {
         try {
-            Rect full = displayBounds(decor, task);
+            Object target = unwrapWindowDecor(decor);
+            setTaskFullImmersive(target, task, true);
+            Rect full = displayBounds(target, task);
             if (full == null) {
-                full = displayBoundsFromContext(decor);
+                full = displayBoundsFromContext(target);
             }
             Object token = field(task, "token");
-            Object organizer = field(decor, "mTaskOrganizer");
+            Object organizer = field(target, "mTaskOrganizer");
             if (full != null && token != null && organizer != null) {
                 Class<?> wctClass = Class.forName(
                         "android.window.WindowContainerTransaction", false, decor.getClass().getClassLoader());
@@ -1770,18 +2246,8 @@ public final class SystemUIWindowDecorHook {
                 try {
                     XposedHelpers.callMethod(wct, "setForceImmersiveChange", token);
                 } catch (Throwable ignored) {}
+                removeCaptionInsets(decor, wct);
                 XposedHelpers.callMethod(organizer, "applyTransaction", wct);
-            }
-            Object repos = field(decor, "desktopUserRepositories");
-            if (repos == null) {
-                repos = field(decor, "mDesktopUserRepositories");
-            }
-            if (repos != null) {
-                Object repo = XposedHelpers.callMethod(repos, "getCurrent");
-                int displayId = task.getClass().getField("displayId").getInt(task);
-                int taskId = task.getClass().getField("taskId").getInt(task);
-                XposedHelpers.callMethod(repo, "setTaskInFullImmersiveState",
-                        Integer.valueOf(displayId), Integer.valueOf(taskId), Boolean.TRUE);
             }
         } catch (Throwable error) {
             XposedBridge.log(TAG + ": immersive commit failed: " + error);
@@ -2094,6 +2560,10 @@ public final class SystemUIWindowDecorHook {
         raisePinned(surfaceFor(id));
     }
 
+    private static final String MAXIMIZE_FULLSCREEN_TOOLTIP = "Maximize/Fullscreen";
+    private static final WeakHashMap<View, CharSequence> ORIGINAL_MAXIMIZE_TOOLTIPS =
+            new WeakHashMap<View, CharSequence>();
+
     private static void settleMaximizeButton(Object decor, View root, boolean on) {
         View maximize = findSysUiView(root, IDX_MAXIMIZE_BUTTON);
         View freeform = findSysUiView(root, IDX_TOGGLE_FREEFORM);
@@ -2111,8 +2581,10 @@ public final class SystemUIWindowDecorHook {
             }
         }
         View holdTarget = freeformShown ? freeform : maximize;
-        if (!on || holdTarget == null
-                || !ModConfig.getBoolean(root.getContext(), ModConfig.KEY_HOLD_MAXIMIZE_FULLSCREEN, true)) {
+        boolean holdFullscreen = on && holdTarget != null
+                && ModConfig.getBoolean(root.getContext(), ModConfig.KEY_HOLD_MAXIMIZE_FULLSCREEN, true);
+        updateMaximizeTooltip(decor, holdTarget, holdFullscreen);
+        if (!holdFullscreen) {
             return;
         }
         Object listener = field(decor, "mOnCaptionLongClickListener");
@@ -2124,6 +2596,26 @@ public final class SystemUIWindowDecorHook {
                     "setOnLongClickListener",
                     Class.forName("android.view.View$OnLongClickListener"));
             set.invoke(holdTarget, listener);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void updateMaximizeTooltip(Object decor, View button, boolean holdFullscreen) {
+        if (button == null) {
+            return;
+        }
+        try {
+            CharSequence current = button.getTooltipText();
+            if (current != null && !MAXIMIZE_FULLSCREEN_TOOLTIP.equals(current.toString())) {
+                ORIGINAL_MAXIMIZE_TOOLTIPS.put(button, current);
+            }
+            if (holdFullscreen && !isTaskMaximizedDecor(decor)) {
+                if (current == null || !MAXIMIZE_FULLSCREEN_TOOLTIP.equals(current.toString())) {
+                    button.setTooltipText(MAXIMIZE_FULLSCREEN_TOOLTIP);
+                }
+            } else if (current != null && MAXIMIZE_FULLSCREEN_TOOLTIP.equals(current.toString())) {
+                CharSequence original = ORIGINAL_MAXIMIZE_TOOLTIPS.get(button);
+                button.setTooltipText(original != null ? original : "Maximize");
+            }
         } catch (Throwable ignored) {}
     }
 
