@@ -40,6 +40,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -159,6 +160,13 @@ public final class LauncherDexTaskbarHook {
     private static volatile Context appContext;
     private static volatile int scalePercent = SCALE_DEFAULT;
     private static volatile int heightScalePercent = 100;
+    private static volatile float scaleFactor = 1f;
+    private static volatile float heightScaleFactor = 1f;
+    private static volatile Method contextGetDisplayMethod;
+    private static volatile Method displayGetTypeMethod;
+    private static volatile Method displayManagerGetDisplayMethod;
+    private static final ConcurrentHashMap<Integer, Boolean> DIMEN_NON_DEX_CACHE =
+            new ConcurrentHashMap<Integer, Boolean>();
     private static volatile boolean modsEnabled = true;
     private static volatile boolean taskbarEnabled = true;
     private static volatile boolean fixExternalDpi;
@@ -247,7 +255,7 @@ public final class LauncherDexTaskbarHook {
             }
         } catch (Throwable ignored) {}
         if (taskbarModsOn()) {
-            return Math.max(1, Math.round(basePx * (heightScalePercent / 100f)));
+            return Math.max(1, Math.round(basePx * heightScaleFactor));
         }
         return basePx;
     }
@@ -274,7 +282,12 @@ public final class LauncherDexTaskbarHook {
     public static boolean isBuiltInDisplay(Context ctx) {
         if (ctx == null) return true;
         try {
-            Object d = ctx.getClass().getMethod("getDisplay").invoke(ctx);
+            Method m = contextGetDisplayMethod;
+            if (m == null) {
+                m = Context.class.getMethod("getDisplay");
+                contextGetDisplayMethod = m;
+            }
+            Object d = m.invoke(ctx);
             if (d instanceof Display) {
                 return isBuiltInDisplayObject(d);
             }
@@ -294,7 +307,12 @@ public final class LauncherDexTaskbarHook {
             return false;
         }
         try {
-            Object type = display.getClass().getMethod("getType").invoke(display);
+            Method m = displayGetTypeMethod;
+            if (m == null) {
+                m = display.getClass().getMethod("getType");
+                displayGetTypeMethod = m;
+            }
+            Object type = m.invoke(display);
             if (type instanceof Integer) {
                 // Display.TYPE_INTERNAL == 1 (covers foldable cover/main internal screens)
                 return ((Integer) type).intValue() == 1;
@@ -319,8 +337,12 @@ public final class LauncherDexTaskbarHook {
             if (manager == null) {
                 return false;
             }
-            Object display = manager.getClass().getMethod("getDisplay", int.class)
-                    .invoke(manager, Integer.valueOf(id));
+            Method m = displayManagerGetDisplayMethod;
+            if (m == null) {
+                m = manager.getClass().getMethod("getDisplay", int.class);
+                displayManagerGetDisplayMethod = m;
+            }
+            Object display = m.invoke(manager, Integer.valueOf(id));
             return isBuiltInDisplayObject(display);
         } catch (Throwable ignored) {
             return false;
@@ -328,7 +350,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     public static void install(final XC_LoadPackage.LoadPackageParam lpparam) {
-        LauncherClassResolver.resolve(lpparam.appInfo != null ? lpparam.appInfo.sourceDir : null);
+        LauncherClassResolver.resolve(lpparam.appInfo);
         ClassLoader loader = lpparam.classLoader;
         hookDexSpace(loader, HONEY_SPACE);
         hookDexSpace(loader, COMBINED);
@@ -611,6 +633,11 @@ public final class LauncherDexTaskbarHook {
                         || method.getDeclaringClass() == Object.class) {
                     continue;
                 }
+                String mName = method.getName();
+                if ("equals".equals(mName) || "hashCode".equals(mName) || "toString".equals(mName)
+                        || "describeContents".equals(mName) || "writeToParcel".equals(mName)) {
+                    continue;
+                }
                 try {
                     XposedBridge.hookMethod(method, DEPTH_HOOK);
                     count++;
@@ -735,19 +762,21 @@ public final class LauncherDexTaskbarHook {
             if (!isBuiltInDisplay(ctx) && !fixExternalDpi) {
                 return;
             }
-            if (DEPTH.get()[0] <= 0 && !Boolean.TRUE.equals(DEX_UI.get()) && !calledFromDexUi()) {
-                return;
+            int resId = (param.args.length > 1 && param.args[1] instanceof Integer)
+                    ? ((Integer) param.args[1]).intValue()
+                    : 0;
+            if (DEPTH.get()[0] <= 0 && !Boolean.TRUE.equals(DEX_UI.get())) {
+                if (isKnownNonDexDimen(ctx, resId) || !calledFromDexUi()) {
+                    return;
+                }
             }
             float density = contextDensity(ctx);
             if (density < 0.5f) {
                 return;
             }
-            int resId = (param.args.length > 1 && param.args[1] instanceof Integer)
-                    ? ((Integer) param.args[1]).intValue()
-                    : 0;
             float effectiveScale = (resId != 0 && resId == getTaskBarHeightDexId(ctx))
-                    ? (heightScalePercent / 100f)
-                    : (scalePercent / 100f);
+                    ? heightScaleFactor
+                    : scaleFactor;
             int px = Math.round(dp * density * effectiveScale);
             if (px == dp) {
                 return;
@@ -763,28 +792,55 @@ public final class LauncherDexTaskbarHook {
 
     private static float contextDensity(Context context) {
         try {
-            Object resources = context.getClass().getMethod("getResources").invoke(context);
-            Object metrics = resources.getClass().getMethod("getDisplayMetrics").invoke(resources);
-            return metrics.getClass().getField("density").getFloat(metrics);
+            return context.getResources().getDisplayMetrics().density;
         } catch (Throwable error) {
             return 0f;
         }
     }
 
+    private static boolean isKnownNonDexDimen(Context ctx, int resId) {
+        if (resId == 0) {
+            return false;
+        }
+        Boolean cached = DIMEN_NON_DEX_CACHE.get(Integer.valueOf(resId));
+        if (cached != null) {
+            return cached.booleanValue();
+        }
+        boolean nonDex = false;
+        try {
+            String name = ctx.getResources().getResourceEntryName(resId);
+            if (name != null) {
+                nonDex = name.startsWith("workspace_")
+                        || name.startsWith("applist_")
+                        || name.startsWith("apps_")
+                        || name.startsWith("folder_")
+                        || name.startsWith("open_folder_")
+                        || name.startsWith("widget_")
+                        || name.startsWith("stacked_widget_")
+                        || name.startsWith("page_indicator_")
+                        || name.startsWith("minus_one_")
+                        || name.startsWith("screen_grid_")
+                        || name.startsWith("cell_layout_")
+                        || name.startsWith("drag_guide_");
+            }
+        } catch (Throwable ignored) {}
+        DIMEN_NON_DEX_CACHE.putIfAbsent(Integer.valueOf(resId), Boolean.valueOf(nonDex));
+        return nonDex;
+    }
+
     private static boolean calledFromDexUi() {
         LauncherClassResolver.ResolvedClasses resolved = LauncherClassResolver.getCached();
-        Set<String> prefixes = (resolved != null && !resolved.dexUiPackagePrefixes.isEmpty())
-                ? resolved.dexUiPackagePrefixes : null;
-        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        int limit = stack.length < 36 ? stack.length : 36;
-        for (int i = 0; i < limit; i++) {
+        String[] prefixes = resolved != null ? resolved.getDexUiPrefixArray() : null;
+        StackTraceElement[] stack = new Throwable().getStackTrace();
+        int limit = stack.length < 24 ? stack.length : 24;
+        for (int i = 2; i < limit; i++) {
             String name = stack[i].getClassName();
             if (name.indexOf("taskbar") >= 0 || name.indexOf("dexpanel") >= 0) {
                 return true;
             }
             if (prefixes != null) {
-                for (String prefix : prefixes) {
-                    if (name.startsWith(prefix)) {
+                for (int j = 0; j < prefixes.length; j++) {
+                    if (name.startsWith(prefixes[j])) {
                         return true;
                     }
                 }
@@ -799,7 +855,7 @@ public final class LauncherDexTaskbarHook {
 
     private static void readSettings(Context context) {
         if (context == null) return;
-        ModConfig.reload(context);
+        ModConfig.ensureInitialized(context);
         int scale = clampScale(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_ICON_SCALE, SCALE_DEFAULT));
         int heightScale = clamp(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_HEIGHT_SCALE, 100), 65, 135);
         boolean enabled = ModConfig.isModuleEnabled(context);
@@ -816,6 +872,8 @@ public final class LauncherDexTaskbarHook {
         synchronized (LauncherDexTaskbarHook.class) {
             scalePercent = scale;
             heightScalePercent = heightScale;
+            scaleFactor = scale / 100f;
+            heightScaleFactor = heightScale / 100f;
             modsEnabled = enabled;
             taskbarEnabled = taskbar;
             fixExternalDpi = extDpi;

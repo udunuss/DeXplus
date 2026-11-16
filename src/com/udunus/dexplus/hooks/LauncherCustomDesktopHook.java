@@ -146,7 +146,13 @@ public final class LauncherCustomDesktopHook {
     private static final String DOTFILE_ORDER = ".dexplus_order";
     private static final ExecutorService sThumbExecutor = Executors.newFixedThreadPool(2);
     private static final ExecutorService sExternalMoveExecutor = Executors.newSingleThreadExecutor();
+    private static final ExecutorService sDesktopLoadExecutor = Executors.newSingleThreadExecutor();
+    private static final Object FILE_DESKTOP_IO_LOCK = new Object();
     private static final LruCache<String, Bitmap> sThumbCache = new LruCache<>(64);
+    private static final LruCache<String, Bitmap> sFileTypeIconCache = new LruCache<>(64);
+    private static final LruCache<String, CachedDexscData> sDexscCache = new LruCache<>(256);
+    private static final LruCache<String, CachedAppEntry> sPrefsAppCache = new LruCache<>(128);
+    private static volatile Bitmap sFolderIconBitmap;
 
     private static volatile FrameLayout sActiveDesktopContainer;
     private static volatile ViewGroup sActiveWorkspaceContainer;
@@ -159,7 +165,7 @@ public final class LauncherCustomDesktopHook {
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
-        LauncherClassResolver.resolve(lpparam.appInfo != null ? lpparam.appInfo.sourceDir : null);
+        LauncherClassResolver.resolve(lpparam.appInfo);
 
         hookWorkspaceContainer(cl);
         hookInternalDexTransition(cl);
@@ -778,7 +784,7 @@ public final class LauncherCustomDesktopHook {
                     ensureDesktopOverlayAttached(wsContainer);
                     updateWorkspaceAndDesktopVisibility(wsContainer);
                     if (sActiveDesktopContainer instanceof ClassicDexDesktopView) {
-                        ((ClassicDexDesktopView) sActiveDesktopContainer).rebuildGrid();
+                        ((ClassicDexDesktopView) sActiveDesktopContainer).rebuildGridAsync();
                     }
                 } catch (Throwable ignored) {}
             }
@@ -815,7 +821,7 @@ public final class LauncherCustomDesktopHook {
                     if (child.getVisibility() != View.VISIBLE) {
                         child.setVisibility(View.VISIBLE);
                         if (child instanceof ClassicDexDesktopView) {
-                            ((ClassicDexDesktopView) child).rebuildGrid();
+                            ((ClassicDexDesktopView) child).rebuildGridAsync();
                         }
                     }
                     child.bringToFront();
@@ -858,7 +864,7 @@ public final class LauncherCustomDesktopHook {
                     mUiHandler.postDelayed(this, 300L);
                     return;
                 }
-                rebuildGrid();
+                rebuildGridAsync();
             }
         };
         private long mLastClickTime = 0L;
@@ -871,6 +877,14 @@ public final class LauncherCustomDesktopHook {
         private int mCurrentRows = 7;
         private int mCurrentCellW = 0;
         private int mCurrentCellH = 0;
+        private int mLoadGeneration = 0;
+        private int mRenderedCols = -1;
+        private int mRenderedRows = -1;
+        private int mRenderedCellW = -1;
+        private int mRenderedCellH = -1;
+        private int mRenderedIconSizePx = -1;
+        private boolean mRenderedFreePlacement = true;
+        private String[] mRenderedSlotSigs;
         private int mPendingAddCol = -1;
         private int mPendingAddRow = -1;
         private boolean mCtrlDown = false;
@@ -1181,7 +1195,7 @@ public final class LauncherCustomDesktopHook {
                 }
             });
 
-            rebuildGrid();
+            rebuildGridAsync();
         }
 
         void recordPointerLocation(float localX, float localY) {
@@ -1299,12 +1313,7 @@ public final class LauncherCustomDesktopHook {
             if (w > 0 && h > 0 && (w != oldw || h != oldh)) {
                 sLastViewWidth = w;
                 sLastViewHeight = h;
-                post(new Runnable() {
-                    @Override
-                    public void run() {
-                        rebuildGrid();
-                    }
-                });
+                rebuildGridAsync();
             }
         }
 
@@ -1653,10 +1662,12 @@ public final class LauncherCustomDesktopHook {
                             }
                             if ("reset_shortcuts".equals(cmd)) {
                                 resetDesktopShortcuts(ctx);
+                                sDexscCache.evictAll();
+                                sPrefsAppCache.evictAll();
                             } else if ("import_legacy_shortcuts".equals(cmd)) {
                                 importNonFileShortcutsToFileDesktop(ctx);
                             }
-                            rebuildGrid();
+                            rebuildGridAsync();
                         }
                     }
                 };
@@ -1679,14 +1690,128 @@ public final class LauncherCustomDesktopHook {
             mCommandReceiver = null;
         }
 
+        private static final class GridSnapshot {
+            final DesktopGridMetrics gm;
+            final boolean freePlacement;
+            final int effectiveRows;
+            final List<DesktopShortcutItem> items;
+            final DesktopShortcutItem[][] matrix;
+            final String[] slotSigs;
+
+            GridSnapshot(
+                    DesktopGridMetrics gm,
+                    boolean freePlacement,
+                    int effectiveRows,
+                    List<DesktopShortcutItem> items,
+                    DesktopShortcutItem[][] matrix,
+                    String[] slotSigs) {
+                this.gm = gm;
+                this.freePlacement = freePlacement;
+                this.effectiveRows = effectiveRows;
+                this.items = items;
+                this.matrix = matrix;
+                this.slotSigs = slotSigs;
+            }
+        }
+
+        private GridSnapshot buildGridSnapshot(Context ctx, int width, int height) {
+            DesktopGridMetrics gm = computeDesktopGridMetrics(ctx, width, height);
+            int cols = gm.cols;
+            int rows = gm.rows;
+            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
+            List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
+            if (freePlacement) {
+                Map<String, int[]> placements = resolveGridPlacements(ctx, items, cols, rows);
+                int maxRow = rows - 1;
+                for (int[] pos : placements.values()) {
+                    if (pos[1] > maxRow) maxRow = pos[1];
+                }
+                int effectiveRows = maxRow + 1;
+                DesktopShortcutItem[][] matrix = new DesktopShortcutItem[cols][effectiveRows];
+                for (DesktopShortcutItem item : items) {
+                    int[] pos = placements.get(item.storageKey);
+                    if (pos != null && pos[0] >= 0 && pos[0] < cols && pos[1] >= 0 && pos[1] < effectiveRows) {
+                        matrix[pos[0]][pos[1]] = item;
+                    }
+                }
+                String[] slotSigs = new String[cols * effectiveRows];
+                for (int r = 0; r < effectiveRows; r++) {
+                    for (int c = 0; c < cols; c++) {
+                        slotSigs[r * cols + c] = itemSignature(matrix[c][r]);
+                    }
+                }
+                return new GridSnapshot(gm, true, effectiveRows, items, matrix, slotSigs);
+            } else {
+                int effectiveRows = Math.max(rows, (items.size() + cols - 1) / cols);
+                String[] slotSigs = new String[items.size()];
+                for (int i = 0; i < items.size(); i++) {
+                    slotSigs[i] = itemSignature(items.get(i));
+                }
+                return new GridSnapshot(gm, false, effectiveRows, items, null, slotSigs);
+            }
+        }
+
+        void rebuildGridAsync() {
+            final Context ctx = getContext();
+            if (ctx == null) return;
+            if (mInlineRenameEditor != null && !mFinishingInlineRename) {
+                finishInlineRename(false);
+            }
+            if (getWidth() > 0 && getHeight() > 0) {
+                sLastViewWidth = getWidth();
+                sLastViewHeight = getHeight();
+            }
+            final int viewW = getWidth();
+            final int viewH = getHeight();
+            final int gen = ++mLoadGeneration;
+            final Context loadCtx = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
+            sDesktopLoadExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final GridSnapshot snapshot = buildGridSnapshot(loadCtx, viewW, viewH);
+                    mUiHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (gen != mLoadGeneration || getContext() == null) {
+                                return;
+                            }
+                            syncFileObserver(getContext());
+                            applyGridSnapshot(getContext(), snapshot);
+                        }
+                    });
+                }
+            });
+        }
+
         void rebuildGrid() {
             Context ctx = getContext();
             if (ctx == null) return;
             if (mInlineRenameEditor != null && !mFinishingInlineRename) {
                 finishInlineRename(false);
             }
-
+            ++mLoadGeneration;
             syncFileObserver(ctx);
+            if (getWidth() > 0 && getHeight() > 0) {
+                sLastViewWidth = getWidth();
+                sLastViewHeight = getHeight();
+            }
+            GridSnapshot snapshot = buildGridSnapshot(ctx, getWidth(), getHeight());
+            applyGridSnapshot(ctx, snapshot);
+        }
+
+        private void applyGridSnapshot(Context ctx, GridSnapshot snapshot) {
+            DesktopGridMetrics gm = snapshot.gm;
+            int cols = gm.cols;
+            int effectiveRows = snapshot.effectiveRows;
+            int cellW = gm.cellW;
+            int cellH = gm.cellH;
+            int iconSizePx = gm.iconSizePx;
+            boolean freePlacement = snapshot.freePlacement;
+
+            mCurrentCols = cols;
+            mCurrentRows = gm.rows;
+            mCurrentCellW = cellW;
+            mCurrentCellH = cellH;
 
             Set<String> previousSelection = new LinkedHashSet<>(mSelectedKeys);
             String previousAnchor = mSelectionAnchorKey;
@@ -1696,91 +1821,156 @@ public final class LauncherCustomDesktopHook {
             mCellViews.clear();
             mSlotMap.clear();
 
-            if (getWidth() > 0 && getHeight() > 0) {
-                sLastViewWidth = getWidth();
-                sLastViewHeight = getHeight();
+            if (mGridLayout.getPaddingLeft() != gm.padLeft
+                    || mGridLayout.getPaddingTop() != gm.padTop
+                    || mGridLayout.getPaddingRight() != gm.padRight
+                    || mGridLayout.getPaddingBottom() != gm.padBottom) {
+                mGridLayout.setPadding(gm.padLeft, gm.padTop, gm.padRight, gm.padBottom);
             }
-            DesktopGridMetrics gm = computeDesktopGridMetrics(ctx, getWidth(), getHeight());
-            int cols = gm.cols;
-            int rows = gm.rows;
-            mCurrentCols = cols;
-            mCurrentRows = rows;
-            mCurrentCellW = gm.cellW;
-            mCurrentCellH = gm.cellH;
-            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
 
-            mGridLayout.setPadding(gm.padLeft, gm.padTop, gm.padRight, gm.padBottom);
-
-            List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
-            int cellW = gm.cellW;
-            int cellH = gm.cellH;
-            int iconSizePx = gm.iconSizePx;
-
-            mGridLayout.removeAllViews();
-
+            String[] newSigs = snapshot.slotSigs;
             if (freePlacement) {
-                Map<String, int[]> placements = resolveGridPlacements(ctx, items, cols, rows);
-                int maxRow = rows - 1;
-                for (int[] pos : placements.values()) {
-                    if (pos[1] > maxRow) maxRow = pos[1];
-                }
-                int effectiveRows = maxRow + 1;
-                mGridLayout.setOrientation(GridLayout.HORIZONTAL);
-                mGridLayout.setColumnCount(cols);
-                mGridLayout.setRowCount(effectiveRows);
-
-                DesktopShortcutItem[][] matrix = new DesktopShortcutItem[cols][effectiveRows];
-                for (DesktopShortcutItem item : items) {
-                    int[] pos = placements.get(item.storageKey);
-                    if (pos != null && pos[0] >= 0 && pos[0] < cols && pos[1] >= 0 && pos[1] < effectiveRows) {
-                        matrix[pos[0]][pos[1]] = item;
-                    }
-                }
-
-                for (int r = 0; r < effectiveRows; r++) {
-                    for (int c = 0; c < cols; c++) {
-                        DesktopShortcutItem item = matrix[c][r];
-                        GridLayout.LayoutParams lp = new GridLayout.LayoutParams(
-                                GridLayout.spec(r), GridLayout.spec(c));
-                        lp.width = cellW;
-                        lp.height = cellH;
-                        if (item != null) {
-                            View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
-                            mGridLayout.addView(cell);
-                            mCellViews.add(cell);
-                            mSlotMap.put(cell, new int[]{c, r});
-                            if (previousSelection.contains(item.storageKey)) {
-                                mSelectedKeys.add(item.storageKey);
+                int totalSlots = cols * effectiveRows;
+                boolean canDiff = mRenderedFreePlacement
+                        && mRenderedCols == cols
+                        && mRenderedRows == effectiveRows
+                        && mRenderedCellW == cellW
+                        && mRenderedCellH == cellH
+                        && mRenderedIconSizePx == iconSizePx
+                        && mRenderedSlotSigs != null
+                        && mRenderedSlotSigs.length == totalSlots
+                        && mGridLayout.getChildCount() == totalSlots;
+                DesktopShortcutItem[][] matrix = snapshot.matrix;
+                if (canDiff) {
+                    for (int r = 0; r < effectiveRows; r++) {
+                        for (int c = 0; c < cols; c++) {
+                            int idx = r * cols + c;
+                            DesktopShortcutItem item = matrix[c][r];
+                            if (newSigs[idx].equals(mRenderedSlotSigs[idx])) {
+                                View existing = mGridLayout.getChildAt(idx);
+                                existing.setAlpha(1.0f);
+                                mSlotMap.put(existing, new int[]{c, r});
+                                if (item != null) {
+                                    mCellViews.add(existing);
+                                    if (previousSelection.contains(item.storageKey)) {
+                                        mSelectedKeys.add(item.storageKey);
+                                    }
+                                }
+                            } else {
+                                GridLayout.LayoutParams lp = new GridLayout.LayoutParams(
+                                        GridLayout.spec(r), GridLayout.spec(c));
+                                lp.width = cellW;
+                                lp.height = cellH;
+                                mGridLayout.removeViewAt(idx);
+                                if (item != null) {
+                                    View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                                    mGridLayout.addView(cell, idx);
+                                    mCellViews.add(cell);
+                                    mSlotMap.put(cell, new int[]{c, r});
+                                    if (previousSelection.contains(item.storageKey)) {
+                                        mSelectedKeys.add(item.storageKey);
+                                    }
+                                } else {
+                                    View emptySlot = createEmptySlotCell(ctx, c, r, lp);
+                                    mGridLayout.addView(emptySlot, idx);
+                                    mSlotMap.put(emptySlot, new int[]{c, r});
+                                }
                             }
-                        } else {
-                            View emptySlot = createEmptySlotCell(ctx, c, r, lp);
-                            mGridLayout.addView(emptySlot);
-                            mSlotMap.put(emptySlot, new int[]{c, r});
+                        }
+                    }
+                } else {
+                    mGridLayout.removeAllViews();
+                    mGridLayout.setOrientation(GridLayout.HORIZONTAL);
+                    mGridLayout.setColumnCount(cols);
+                    mGridLayout.setRowCount(effectiveRows);
+                    for (int r = 0; r < effectiveRows; r++) {
+                        for (int c = 0; c < cols; c++) {
+                            DesktopShortcutItem item = matrix[c][r];
+                            GridLayout.LayoutParams lp = new GridLayout.LayoutParams(
+                                    GridLayout.spec(r), GridLayout.spec(c));
+                            lp.width = cellW;
+                            lp.height = cellH;
+                            if (item != null) {
+                                View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                                mGridLayout.addView(cell);
+                                mCellViews.add(cell);
+                                mSlotMap.put(cell, new int[]{c, r});
+                                if (previousSelection.contains(item.storageKey)) {
+                                    mSelectedKeys.add(item.storageKey);
+                                }
+                            } else {
+                                View emptySlot = createEmptySlotCell(ctx, c, r, lp);
+                                mGridLayout.addView(emptySlot);
+                                mSlotMap.put(emptySlot, new int[]{c, r});
+                            }
                         }
                     }
                 }
             } else {
-                int effectiveRows = Math.max(rows, (items.size() + cols - 1) / cols);
-                mGridLayout.setOrientation(GridLayout.VERTICAL);
-                mGridLayout.setColumnCount(cols);
-                mGridLayout.setRowCount(effectiveRows);
-
-                for (int i = 0; i < items.size(); i++) {
-                    final DesktopShortcutItem item = items.get(i);
-                    int c = i / effectiveRows;
-                    int r = i % effectiveRows;
-                    GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
-                    lp.width = cellW;
-                    lp.height = cellH;
-                    View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
-                    mGridLayout.addView(cell);
-                    mCellViews.add(cell);
-                    mSlotMap.put(cell, new int[]{c, r});
-                    if (previousSelection.contains(item.storageKey)) {
-                        mSelectedKeys.add(item.storageKey);
+                List<DesktopShortcutItem> items = snapshot.items;
+                boolean canDiff = !mRenderedFreePlacement
+                        && mRenderedCols == cols
+                        && mRenderedRows == effectiveRows
+                        && mRenderedCellW == cellW
+                        && mRenderedCellH == cellH
+                        && mRenderedIconSizePx == iconSizePx
+                        && mRenderedSlotSigs != null
+                        && mRenderedSlotSigs.length == items.size()
+                        && mGridLayout.getChildCount() == items.size();
+                if (canDiff) {
+                    for (int i = 0; i < items.size(); i++) {
+                        DesktopShortcutItem item = items.get(i);
+                        int c = i / effectiveRows;
+                        int r = i % effectiveRows;
+                        if (newSigs[i].equals(mRenderedSlotSigs[i])) {
+                            View existing = mGridLayout.getChildAt(i);
+                            existing.setAlpha(1.0f);
+                            mCellViews.add(existing);
+                            mSlotMap.put(existing, new int[]{c, r});
+                        } else {
+                            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+                            lp.width = cellW;
+                            lp.height = cellH;
+                            mGridLayout.removeViewAt(i);
+                            View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                            mGridLayout.addView(cell, i);
+                            mCellViews.add(cell);
+                            mSlotMap.put(cell, new int[]{c, r});
+                        }
+                        if (previousSelection.contains(item.storageKey)) {
+                            mSelectedKeys.add(item.storageKey);
+                        }
+                    }
+                } else {
+                    mGridLayout.removeAllViews();
+                    mGridLayout.setOrientation(GridLayout.VERTICAL);
+                    mGridLayout.setColumnCount(cols);
+                    mGridLayout.setRowCount(effectiveRows);
+                    for (int i = 0; i < items.size(); i++) {
+                        final DesktopShortcutItem item = items.get(i);
+                        int c = i / effectiveRows;
+                        int r = i % effectiveRows;
+                        GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+                        lp.width = cellW;
+                        lp.height = cellH;
+                        View cell = createDesktopShortcutCell(ctx, item, c, r, lp, iconSizePx);
+                        mGridLayout.addView(cell);
+                        mCellViews.add(cell);
+                        mSlotMap.put(cell, new int[]{c, r});
+                        if (previousSelection.contains(item.storageKey)) {
+                            mSelectedKeys.add(item.storageKey);
+                        }
                     }
                 }
             }
+
+            mRenderedCols = cols;
+            mRenderedRows = effectiveRows;
+            mRenderedCellW = cellW;
+            mRenderedCellH = cellH;
+            mRenderedIconSizePx = iconSizePx;
+            mRenderedFreePlacement = freePlacement;
+            mRenderedSlotSigs = newSigs;
 
             if (previousAnchor != null && mSelectedKeys.contains(previousAnchor)) {
                 mSelectionAnchorKey = previousAnchor;
@@ -3101,11 +3291,11 @@ public final class LauncherCustomDesktopHook {
                 extras.putBoolean("enabled", enabled);
                 context.getContentResolver().call(
                         ModConfig.PREFS_URI, "set_desktop_free_placement", null, extras);
-                ModConfig.reload(context);
+                ModConfig.putCachedBoolean(ModConfig.KEY_DESKTOP_FREE_PLACEMENT, enabled);
             } catch (Throwable t) {
                 XposedBridge.log(ModConfig.TAG + ": toggle free placement failed: " + t);
             }
-            rebuildGrid();
+            rebuildGridAsync();
         }
 
         private void showEmptyDesktopMenu(float x, float y) {
@@ -3170,7 +3360,10 @@ public final class LauncherCustomDesktopHook {
             items.add(new DesktopMenuItem("Refresh desktop", new Runnable() {
                 @Override
                 public void run() {
-                    rebuildGrid();
+                    sDexscCache.evictAll();
+                    sPrefsAppCache.evictAll();
+                    sThumbCache.evictAll();
+                    rebuildGridAsync();
                 }
             }));
             items.add(new DesktopMenuItem("Wallpaper & style", new Runnable() {
@@ -3908,6 +4101,73 @@ public final class LauncherCustomDesktopHook {
         }
     }
 
+    private static String itemSignature(DesktopShortcutItem item) {
+        if (item == null) return "";
+        long mtime = 0L;
+        long len = 0L;
+        if (item.backingFile != null) {
+            mtime = item.backingFile.lastModified();
+            len = item.backingFile.length();
+        }
+        return item.storageKey + '\0' + item.label + '\0'
+                + (item.isDirectory ? '1' : '0') + '\0' + mtime + ':' + len;
+    }
+
+    private static final class CachedDexscData {
+        final long lastModified;
+        final long fileLength;
+        final String label;
+        final ComponentName component;
+        final Intent customIntent;
+        final String customPackage;
+        final boolean isCustomShortcut;
+        final Bitmap bitmap;
+        final Drawable.ConstantState iconState;
+
+        CachedDexscData(
+                long lastModified,
+                long fileLength,
+                String label,
+                ComponentName component,
+                Intent customIntent,
+                String customPackage,
+                boolean isCustomShortcut,
+                Bitmap bitmap,
+                Drawable.ConstantState iconState) {
+            this.lastModified = lastModified;
+            this.fileLength = fileLength;
+            this.label = label;
+            this.component = component;
+            this.customIntent = customIntent;
+            this.customPackage = customPackage;
+            this.isCustomShortcut = isCustomShortcut;
+            this.bitmap = bitmap;
+            this.iconState = iconState;
+        }
+
+        Drawable createDrawable(Context context) {
+            if (bitmap != null && !bitmap.isRecycled()) {
+                return new BitmapDrawable(context.getResources(), bitmap);
+            }
+            if (iconState != null) {
+                return iconState.newDrawable(context.getResources());
+            }
+            return context.getPackageManager().getDefaultActivityIcon();
+        }
+    }
+
+    private static final class CachedAppEntry {
+        final String label;
+        final Drawable.ConstantState iconState;
+        final long cachedAtMs;
+
+        CachedAppEntry(String label, Drawable.ConstantState iconState, long cachedAtMs) {
+            this.label = label;
+            this.iconState = iconState;
+            this.cachedAtMs = cachedAtMs;
+        }
+    }
+
     private static SharedPreferences getDesktopPrefs(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(DESKTOP_PREFS, Context.MODE_PRIVATE);
         if (!legacyDesktopPrefsMigrated) {
@@ -4083,12 +4343,27 @@ public final class LauncherCustomDesktopHook {
                     }
                     ComponentName cn = ComponentName.unflattenFromString(key);
                     if (cn == null) continue;
+                    String cnFlat = cn.flattenToString();
+                    long nowMs = SystemClock.elapsedRealtime();
+                    CachedAppEntry cachedApp = sPrefsAppCache.get(cnFlat);
+                    if (cachedApp != null && cachedApp.iconState != null
+                            && (nowMs - cachedApp.cachedAtMs) < 30_000L) {
+                        Drawable cachedIcon = cachedApp.iconState.newDrawable(context.getResources());
+                        if (cachedIcon != null) {
+                            result.add(new DesktopShortcutItem(cn, cachedApp.label, cachedIcon));
+                            continue;
+                        }
+                    }
                     try {
                         android.content.pm.ActivityInfo ai = pm.getActivityInfo(cn, 0);
                         CharSequence labelCs = ai.loadLabel(pm);
                         String label = labelCs != null ? labelCs.toString() : cn.getClassName();
                         Drawable icon = ai.loadIcon(pm);
                         if (icon != null) {
+                            Drawable.ConstantState cs = icon.getConstantState();
+                            if (cs != null) {
+                                sPrefsAppCache.put(cnFlat, new CachedAppEntry(label, cs, nowMs));
+                            }
                             result.add(new DesktopShortcutItem(cn, label, icon));
                         }
                     } catch (Throwable ignored) {}
@@ -4113,53 +4388,55 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static List<DesktopShortcutItem> loadFileBasedDesktopItems(Context context, int maxCount) {
-        File dir = getDesktopDirectory(context);
-        File initMarker = new File(dir, DOTFILE_INIT);
-        if (!initMarker.exists()) {
-            seedFileDesktopDefaults(context, dir, maxCount);
-        }
+        synchronized (FILE_DESKTOP_IO_LOCK) {
+            File dir = getDesktopDirectory(context);
+            File initMarker = new File(dir, DOTFILE_INIT);
+            if (!initMarker.exists()) {
+                seedFileDesktopDefaults(context, dir, maxCount);
+            }
 
-        File[] rawFiles = dir.listFiles();
-        Map<String, DesktopShortcutItem> byKey = new HashMap<>();
-        List<DesktopShortcutItem> discovered = new ArrayList<>();
-        if (rawFiles != null) {
-            Arrays.sort(rawFiles, new Comparator<File>() {
-                @Override
-                public int compare(File a, File b) {
-                    if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
-                    return a.getName().compareToIgnoreCase(b.getName());
-                }
-            });
-            for (File f : rawFiles) {
-                if (f == null || f.getName().startsWith(".")) continue;
-                DesktopShortcutItem item = buildFileDesktopItem(context, f);
-                if (item != null) {
-                    byKey.put(item.storageKey, item);
-                    discovered.add(item);
+            File[] rawFiles = dir.listFiles();
+            Map<String, DesktopShortcutItem> byKey = new HashMap<>();
+            List<DesktopShortcutItem> discovered = new ArrayList<>();
+            if (rawFiles != null) {
+                Arrays.sort(rawFiles, new Comparator<File>() {
+                    @Override
+                    public int compare(File a, File b) {
+                        if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                        return a.getName().compareToIgnoreCase(b.getName());
+                    }
+                });
+                for (File f : rawFiles) {
+                    if (f == null || f.getName().startsWith(".")) continue;
+                    DesktopShortcutItem item = buildFileDesktopItem(context, f);
+                    if (item != null) {
+                        byKey.put(item.storageKey, item);
+                        discovered.add(item);
+                    }
                 }
             }
-        }
 
-        List<String> savedOrder = readLinesFile(new File(dir, DOTFILE_ORDER));
-        List<DesktopShortcutItem> result = new ArrayList<>();
-        Set<String> finalOrder = new LinkedHashSet<>();
-        for (String k : savedOrder) {
-            DesktopShortcutItem match = byKey.get(k);
-            if (match != null && finalOrder.add(k)) {
-                result.add(match);
+            List<String> savedOrder = readLinesFile(new File(dir, DOTFILE_ORDER));
+            List<DesktopShortcutItem> result = new ArrayList<>();
+            Set<String> finalOrder = new LinkedHashSet<>();
+            for (String k : savedOrder) {
+                DesktopShortcutItem match = byKey.get(k);
+                if (match != null && finalOrder.add(k)) {
+                    result.add(match);
+                }
             }
-        }
-        boolean orderChanged = (finalOrder.size() != savedOrder.size());
-        for (DesktopShortcutItem item : discovered) {
-            if (finalOrder.add(item.storageKey)) {
-                result.add(item);
-                orderChanged = true;
+            boolean orderChanged = (finalOrder.size() != savedOrder.size());
+            for (DesktopShortcutItem item : discovered) {
+                if (finalOrder.add(item.storageKey)) {
+                    result.add(item);
+                    orderChanged = true;
+                }
             }
+            if (orderChanged) {
+                writeLinesFile(new File(dir, DOTFILE_ORDER), finalOrder);
+            }
+            return result;
         }
-        if (orderChanged) {
-            writeLinesFile(new File(dir, DOTFILE_ORDER), finalOrder);
-        }
-        return result;
     }
 
     private static void seedFileDesktopDefaults(Context context, File dir, int maxCount) {
@@ -4332,6 +4609,17 @@ public final class LauncherCustomDesktopHook {
 
     private static DesktopShortcutItem parseDexscFile(Context context, File file, String storageKey) {
         try {
+            String path = file.getAbsolutePath();
+            long mtime = file.lastModified();
+            long flen = file.length();
+            CachedDexscData cached = sDexscCache.get(path);
+            if (cached != null && cached.lastModified == mtime && cached.fileLength == flen) {
+                return new DesktopShortcutItem(
+                        storageKey, cached.component, cached.customIntent, cached.customPackage,
+                        cached.label, cached.createDrawable(context),
+                        cached.isCustomShortcut, false, file, false, "application/x-dexplus-shortcut");
+            }
+
             String name = null;
             String type = null;
             String compStr = null;
@@ -4356,13 +4644,23 @@ public final class LauncherCustomDesktopHook {
                 }
             }
 
+            Bitmap decodedBmp = null;
             Drawable icon = null;
             if (!TextUtils.isEmpty(iconB64)) {
                 try {
                     byte[] raw = Base64.decode(iconB64, Base64.DEFAULT);
-                    Bitmap bmp = BitmapFactory.decodeByteArray(raw, 0, raw.length);
-                    if (bmp != null) {
-                        icon = new BitmapDrawable(context.getResources(), bmp);
+                    BitmapFactory.Options opts = new BitmapFactory.Options();
+                    opts.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(raw, 0, raw.length, opts);
+                    int sample = 1;
+                    while ((opts.outWidth / sample) > 256 && (opts.outHeight / sample) > 256) {
+                        sample *= 2;
+                    }
+                    opts.inJustDecodeBounds = false;
+                    opts.inSampleSize = sample;
+                    decodedBmp = BitmapFactory.decodeByteArray(raw, 0, raw.length, opts);
+                    if (decodedBmp != null) {
+                        icon = new BitmapDrawable(context.getResources(), decodedBmp);
                     }
                 } catch (Throwable ignored) {}
             }
@@ -4389,6 +4687,9 @@ public final class LauncherCustomDesktopHook {
                 if (TextUtils.isEmpty(name)) {
                     name = stripKnownExtension(file.getName(), DEXSC_EXT);
                 }
+                sDexscCache.put(path, new CachedDexscData(
+                        mtime, flen, name, cn, null, cn.getPackageName(), false,
+                        decodedBmp, icon.getConstantState()));
                 return new DesktopShortcutItem(
                         storageKey, cn, null, cn.getPackageName(), name, icon,
                         false, false, file, false, "application/x-dexplus-shortcut");
@@ -4405,6 +4706,9 @@ public final class LauncherCustomDesktopHook {
                 if (TextUtils.isEmpty(name)) {
                     name = stripKnownExtension(file.getName(), DEXSC_EXT);
                 }
+                sDexscCache.put(path, new CachedDexscData(
+                        mtime, flen, name, null, parsedIntent, pkg, true,
+                        decodedBmp, icon.getConstantState()));
                 return new DesktopShortcutItem(
                         storageKey, null, parsedIntent, pkg, name, icon,
                         true, false, file, false, "application/x-dexplus-shortcut");
@@ -4543,45 +4847,57 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static Drawable createFolderIcon(Context context) {
-        int s = 144;
-        Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bmp);
+        Bitmap bmp = sFolderIconBitmap;
+        if (bmp == null || bmp.isRecycled()) {
+            int s = 144;
+            bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bmp);
 
-        Paint backPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        backPaint.setColor(Color.rgb(217, 119, 6));
-        Path tabPath = new Path();
-        RectF tabRect = new RectF(14, 24, 68, 52);
-        tabPath.addRoundRect(tabRect, 10, 10, Path.Direction.CW);
-        canvas.drawPath(tabPath, backPaint);
+            Paint backPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            backPaint.setColor(Color.rgb(217, 119, 6));
+            Path tabPath = new Path();
+            RectF tabRect = new RectF(14, 24, 68, 52);
+            tabPath.addRoundRect(tabRect, 10, 10, Path.Direction.CW);
+            canvas.drawPath(tabPath, backPaint);
 
-        RectF backBody = new RectF(14, 36, 130, 114);
-        canvas.drawRoundRect(backBody, 14, 14, backPaint);
+            RectF backBody = new RectF(14, 36, 130, 114);
+            canvas.drawRoundRect(backBody, 14, 14, backPaint);
 
-        Paint frontPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        frontPaint.setColor(Color.rgb(251, 191, 36));
-        RectF frontRect = new RectF(14, 46, 130, 118);
-        canvas.drawRoundRect(frontRect, 14, 14, frontPaint);
+            Paint frontPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            frontPaint.setColor(Color.rgb(251, 191, 36));
+            RectF frontRect = new RectF(14, 46, 130, 118);
+            canvas.drawRoundRect(frontRect, 14, 14, frontPaint);
 
-        Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        highlightPaint.setColor(Color.argb(95, 255, 255, 255));
-        canvas.drawRect(22, 50, 122, 54, highlightPaint);
-
+            Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            highlightPaint.setColor(Color.argb(95, 255, 255, 255));
+            canvas.drawRect(22, 50, 122, 54, highlightPaint);
+            sFolderIconBitmap = bmp;
+        }
         return new BitmapDrawable(context.getResources(), bmp);
     }
 
     private static Drawable createFileTypeIcon(Context context, String ext, String mime) {
+        int accentColor = Color.rgb(100, 116, 139);
+        int kind = 0;
+        if (mime.startsWith("video/")) { accentColor = Color.rgb(139, 92, 246); kind = 1; }
+        else if (mime.startsWith("image/")) { accentColor = Color.rgb(16, 185, 129); kind = 2; }
+        else if (mime.startsWith("audio/")) { accentColor = Color.rgb(236, 72, 153); kind = 3; }
+        else if ("application/pdf".equals(mime)) { accentColor = Color.rgb(239, 68, 68); kind = 4; }
+        else if ("application/vnd.android.package-archive".equals(mime)) { accentColor = Color.rgb(34, 197, 94); kind = 5; }
+        else if ("application/zip".equals(mime)) { accentColor = Color.rgb(245, 158, 11); kind = 6; }
+        else if (mime.startsWith("text/") || "text/uri-list".equals(mime)) { accentColor = Color.rgb(59, 130, 246); kind = 7; }
+
+        String badge = !TextUtils.isEmpty(ext) ? ext.toUpperCase(Locale.ROOT) : "FILE";
+        if (badge.length() > 4) badge = badge.substring(0, 4);
+        String cacheKey = kind + ":" + badge;
+        Bitmap cached = sFileTypeIconCache.get(cacheKey);
+        if (cached != null && !cached.isRecycled()) {
+            return new BitmapDrawable(context.getResources(), cached);
+        }
+
         int s = 144;
         Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bmp);
-
-        int accentColor = Color.rgb(100, 116, 139);
-        if (mime.startsWith("video/")) accentColor = Color.rgb(139, 92, 246);
-        else if (mime.startsWith("image/")) accentColor = Color.rgb(16, 185, 129);
-        else if (mime.startsWith("audio/")) accentColor = Color.rgb(236, 72, 153);
-        else if ("application/pdf".equals(mime)) accentColor = Color.rgb(239, 68, 68);
-        else if ("application/vnd.android.package-archive".equals(mime)) accentColor = Color.rgb(34, 197, 94);
-        else if ("application/zip".equals(mime)) accentColor = Color.rgb(245, 158, 11);
-        else if (mime.startsWith("text/") || "text/uri-list".equals(mime)) accentColor = Color.rgb(59, 130, 246);
 
         Paint pagePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         pagePaint.setColor(Color.rgb(248, 250, 252));
@@ -4599,7 +4915,7 @@ public final class LauncherCustomDesktopHook {
         RectF bannerRect = new RectF(32, 74, 112, 112);
         canvas.drawRoundRect(bannerRect, 8, 8, bannerPaint);
 
-        if (mime.startsWith("video/")) {
+        if (kind == 1) {
             Paint triPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             triPaint.setColor(accentColor);
             Path play = new Path();
@@ -4608,7 +4924,7 @@ public final class LauncherCustomDesktopHook {
             play.lineTo(88, 45);
             play.close();
             canvas.drawPath(play, triPaint);
-        } else if ("application/vnd.android.package-archive".equals(mime)) {
+        } else if (kind == 5) {
             drawAndroidRobotHead(canvas, 72f, 52f, 22f, Color.rgb(34, 197, 94), Color.WHITE);
         } else {
             Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -4618,8 +4934,6 @@ public final class LauncherCustomDesktopHook {
             canvas.drawRoundRect(new RectF(36, 58, 84, 64), 3, 3, linePaint);
         }
 
-        String badge = !TextUtils.isEmpty(ext) ? ext.toUpperCase(Locale.ROOT) : "FILE";
-        if (badge.length() > 4) badge = badge.substring(0, 4);
         Paint txtPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         txtPaint.setColor(Color.WHITE);
         txtPaint.setFakeBoldText(true);
@@ -4629,6 +4943,7 @@ public final class LauncherCustomDesktopHook {
         float ty = bannerRect.centerY() - (fm.ascent + fm.descent) * 0.5f;
         canvas.drawText(badge, bannerRect.centerX(), ty, txtPaint);
 
+        sFileTypeIconCache.put(cacheKey, bmp);
         return new BitmapDrawable(context.getResources(), bmp);
     }
 

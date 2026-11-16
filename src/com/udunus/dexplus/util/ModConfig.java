@@ -107,6 +107,7 @@ public final class ModConfig {
     private static final Map<String, Object> CACHE = new ConcurrentHashMap<>(DEFAULTS);
     private static final List<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
     private static volatile boolean receiverRegistered = false;
+    private static volatile boolean providerLoadedOnce = false;
     private static volatile long lastReloadTime = 0L;
     private static XSharedPreferences xPrefs;
 
@@ -224,8 +225,14 @@ public final class ModConfig {
                 }
             }
             reload(context);
-        } else {
+        } else if (!providerLoadedOnce) {
             reloadIfStale(context, 4000L);
+        }
+    }
+
+    public static void putCachedBoolean(String key, boolean value) {
+        if (key != null) {
+            CACHE.put(key, Boolean.valueOf(value));
         }
     }
 
@@ -302,6 +309,7 @@ public final class ModConfig {
                     }
                 }
                 outChanged[0] = replaceCacheWithDefaultsAnd(loaded);
+                providerLoadedOnce = true;
                 lastReloadTime = System.currentTimeMillis();
                 return true;
             }

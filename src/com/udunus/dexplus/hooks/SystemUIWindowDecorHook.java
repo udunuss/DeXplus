@@ -2,6 +2,7 @@ package com.udunus.dexplus.hooks;
 
 import android.content.ClipDescription;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -11,6 +12,7 @@ import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.hardware.input.InputManager;
+import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PersistableBundle;
@@ -42,12 +44,14 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -111,6 +115,7 @@ public final class SystemUIWindowDecorHook {
     private static final WeakHashMap<View, Boolean> HIDDEN_CHEVRON = new WeakHashMap<View, Boolean>();
     private static final Set<Integer> PINNED_IDS = Collections.synchronizedSet(new HashSet<Integer>());
     private static final Map<Integer, TaskChrome> TASK_CHROME = Collections.synchronizedMap(new HashMap<Integer, TaskChrome>());
+    private static final ConcurrentHashMap<Object, TaskChrome> SURFACE_TO_TASK = new ConcurrentHashMap<Object, TaskChrome>();
     private static final Map<Integer, Float> WINDOW_ALPHA = Collections.synchronizedMap(new HashMap<Integer, Float>());
 
     private static final Set<Integer> ALPHA_MANUAL = Collections.synchronizedSet(new HashSet<Integer>());
@@ -121,14 +126,60 @@ public final class SystemUIWindowDecorHook {
 
     private static final ThreadLocal<Boolean> PIN_STAMPING = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> DROP_STATUS_INSET = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<Boolean> SKIP_PIN_STAMP_THREAD = new ThreadLocal<Boolean>() {
+        @Override
+        protected Boolean initialValue() {
+            String n = Thread.currentThread().getName();
+            boolean skip = "RenderThread".equals(n) || n.startsWith("hwui");
+            return Boolean.valueOf(skip);
+        }
+    };
+    private static volatile Object[] pinnedTaskSurfaces = new Object[0];
+    private static final Integer[] PIN_LEVELS = new Integer[16];
+    static {
+        for (int i = 0; i < PIN_LEVELS.length; i++) {
+            PIN_LEVELS[i] = Integer.valueOf(1000000 + i);
+        }
+    }
+
+    private static final Field MISSING_FIELD;
+    private static final Method MISSING_METHOD;
+    static {
+        Field mf = null;
+        Method mm = null;
+        try {
+            mf = SystemUIWindowDecorHook.class.getDeclaredField("PINNED_IDS");
+            mm = SystemUIWindowDecorHook.class.getDeclaredMethod("taskId", Object.class);
+        } catch (Throwable ignored) {}
+        MISSING_FIELD = mf;
+        MISSING_METHOD = mm;
+    }
+    private static final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>> FIELD_CACHE =
+            new ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>>();
+    private static final ConcurrentHashMap<Class<?>, Method> SEM_HOVER_METHOD_CACHE =
+            new ConcurrentHashMap<Class<?>, Method>();
 
     private static volatile boolean pinOrderPosted;
     private static volatile Object pinOrderCover;
     private static int nextFrontRank;
+    private static Class<?> runningTaskInfoClass;
+    private static Class<?> transactionClass;
     private static Constructor<?> transactionCtor;
+    private static Method applyMethod;
     private static Method relativeLayerMethod;
     private static Method layerMethod;
     private static Method alphaMethod;
+    private static Method cornerRadiusMethod;
+    private static Method surfaceIsValidMethod;
+    private static Method desktopUtilsIsMaximizedMethod;
+    private static Method taskWindowingModeMethod;
+    private static Method wcBoundsMethod;
+    private static Method dcGetDisplayLayoutMethod;
+    private static Method layoutStableDesktopBoundsMethod;
+    private static Method layoutWidthMethod;
+    private static Method layoutHeightMethod;
+    private static Method decorIsMaximizedMethod;
+    private static Constructor<?> windowDecorInsetsCtor;
     private static Bitmap infoIcon;
     private static Bitmap pinIcon;
     private static Bitmap unpinIcon;
@@ -473,9 +524,18 @@ public final class SystemUIWindowDecorHook {
         if (args == null) {
             return null;
         }
+        Class<?> rti = runningTaskInfoClass;
         for (int i = 0; i < args.length; i++) {
             Object arg = args[i];
-            if (arg != null && "android.app.ActivityManager$RunningTaskInfo".equals(arg.getClass().getName())) {
+            if (arg == null) {
+                continue;
+            }
+            if (rti != null) {
+                if (rti.isInstance(arg)) {
+                    return arg;
+                }
+            } else if ("android.app.ActivityManager$RunningTaskInfo".equals(arg.getClass().getName())) {
+                runningTaskInfoClass = arg.getClass();
                 return arg;
             }
         }
@@ -489,10 +549,35 @@ public final class SystemUIWindowDecorHook {
         try {
             Object config = field(task, "configuration");
             Object wc = field(config, "windowConfiguration");
-            Object bounds = wc == null ? null : XposedHelpers.callMethod(wc, "getBounds");
+            if (wc == null) {
+                return null;
+            }
+            Method m = wcBoundsMethod;
+            if (m == null) {
+                m = wc.getClass().getMethod("getBounds");
+                wcBoundsMethod = m;
+            }
+            Object bounds = m.invoke(wc);
             return bounds instanceof Rect ? (Rect) bounds : null;
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private static int cachedWindowingMode(Object task) {
+        if (task == null) {
+            return -1;
+        }
+        try {
+            Method m = taskWindowingModeMethod;
+            if (m == null) {
+                m = task.getClass().getMethod("getWindowingMode");
+                taskWindowingModeMethod = m;
+            }
+            Object mode = m.invoke(task);
+            return mode instanceof Integer ? ((Integer) mode).intValue() : -1;
+        } catch (Throwable ignored) {
+            return -1;
         }
     }
 
@@ -503,41 +588,76 @@ public final class SystemUIWindowDecorHook {
         Object argTask = runningTaskFromArgs(args);
         Object task = argTask != null ? argTask : field(decor, "mTaskInfo");
         if (task != null) {
-            try {
-                Object mode = XposedHelpers.callMethod(task, "getWindowingMode");
-                if (mode instanceof Integer && ((Integer) mode).intValue() == 1) {
-                    return true;
-                }
-            } catch (Throwable ignored) {}
+            if (cachedWindowingMode(task) == 1) {
+                return true;
+            }
             if (decor != null) {
                 try {
                     Object dc = field(decor, "mDisplayController");
                     if (dc != null) {
-                        int displayId = XposedHelpers.getIntField(task, "displayId");
-                        Object layout = XposedHelpers.callMethod(dc, "getDisplayLayout", displayId);
+                        Object displayIdObj = field(task, "displayId");
+                        int displayId = displayIdObj instanceof Integer ? ((Integer) displayIdObj).intValue() : 0;
+                        Method getLayout = dcGetDisplayLayoutMethod;
+                        if (getLayout == null) {
+                            getLayout = dc.getClass().getMethod("getDisplayLayout", int.class);
+                            dcGetDisplayLayoutMethod = getLayout;
+                        }
+                        Object layout = getLayout.invoke(dc, Integer.valueOf(displayId));
                         if (layout != null) {
-                            try {
-                                Class<?> utils = Class.forName(
-                                        "com.android.wm.shell.desktopmode.DesktopModeUtils",
-                                        false, decor.getClass().getClassLoader());
-                                if (Boolean.TRUE.equals(XposedHelpers.callStaticMethod(
-                                        utils, "isTaskMaximized", task, layout))) {
-                                    return true;
-                                }
-                            } catch (Throwable ignored) {}
-                            Rect bounds = taskBounds(task);
-                            if (bounds != null && !bounds.isEmpty()) {
-                                Rect stable = new Rect();
+                            Method utilsMethod = desktopUtilsIsMaximizedMethod;
+                            if (utilsMethod == null) {
                                 try {
-                                    XposedHelpers.callMethod(layout, "getStableBoundsForDesktopMode", stable);
-                                    if (!stable.isEmpty() && bounds.width() >= stable.width()
-                                            && bounds.height() >= stable.height()) {
+                                    Class<?> utils = Class.forName(
+                                            "com.android.wm.shell.desktopmode.DesktopModeUtils",
+                                            false, decor.getClass().getClassLoader());
+                                    utilsMethod = utils.getMethod("isTaskMaximized", task.getClass(), layout.getClass());
+                                    utilsMethod.setAccessible(true);
+                                    desktopUtilsIsMaximizedMethod = utilsMethod;
+                                } catch (Throwable ignored) {
+                                    desktopUtilsIsMaximizedMethod = MISSING_METHOD;
+                                    utilsMethod = MISSING_METHOD;
+                                }
+                            }
+                            if (utilsMethod != MISSING_METHOD) {
+                                try {
+                                    if (Boolean.TRUE.equals(utilsMethod.invoke(null, task, layout))) {
                                         return true;
                                     }
                                 } catch (Throwable ignored) {}
+                            }
+                            Rect bounds = taskBounds(task);
+                            if (bounds != null && !bounds.isEmpty()) {
+                                Rect stable = new Rect();
+                                Method stableMethod = layoutStableDesktopBoundsMethod;
+                                if (stableMethod == null) {
+                                    try {
+                                        stableMethod = layout.getClass().getMethod("getStableBoundsForDesktopMode", Rect.class);
+                                        layoutStableDesktopBoundsMethod = stableMethod;
+                                    } catch (Throwable ignored) {
+                                        layoutStableDesktopBoundsMethod = MISSING_METHOD;
+                                        stableMethod = MISSING_METHOD;
+                                    }
+                                }
+                                if (stableMethod != MISSING_METHOD) {
+                                    try {
+                                        stableMethod.invoke(layout, stable);
+                                        if (!stable.isEmpty() && bounds.width() >= stable.width()
+                                                && bounds.height() >= stable.height()) {
+                                            return true;
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
                                 try {
-                                    int dw = ((Integer) XposedHelpers.callMethod(layout, "width")).intValue();
-                                    int dh = ((Integer) XposedHelpers.callMethod(layout, "height")).intValue();
+                                    Method wMethod = layoutWidthMethod;
+                                    Method hMethod = layoutHeightMethod;
+                                    if (wMethod == null || hMethod == null) {
+                                        wMethod = layout.getClass().getMethod("width");
+                                        hMethod = layout.getClass().getMethod("height");
+                                        layoutWidthMethod = wMethod;
+                                        layoutHeightMethod = hMethod;
+                                    }
+                                    int dw = ((Integer) wMethod.invoke(layout)).intValue();
+                                    int dh = ((Integer) hMethod.invoke(layout)).intValue();
                                     if (dw > 0 && dh > 0 && bounds.width() >= dw && bounds.height() >= dh) {
                                         return true;
                                     }
@@ -549,16 +669,27 @@ public final class SystemUIWindowDecorHook {
             }
         }
         if (argTask == null && decor != null) {
-            try {
-                if (Boolean.TRUE.equals(field(decor, "mIsTaskMaximized"))) {
-                    return true;
+            if (Boolean.TRUE.equals(field(decor, "mIsTaskMaximized"))) {
+                return true;
+            }
+            Method decorMaxMethod = decorIsMaximizedMethod;
+            if (decorMaxMethod == null) {
+                try {
+                    decorMaxMethod = decor.getClass().getMethod("isTaskMaximized");
+                    decorMaxMethod.setAccessible(true);
+                    decorIsMaximizedMethod = decorMaxMethod;
+                } catch (Throwable ignored) {
+                    decorIsMaximizedMethod = MISSING_METHOD;
+                    decorMaxMethod = MISSING_METHOD;
                 }
-            } catch (Throwable ignored) {}
-            try {
-                if (Boolean.TRUE.equals(XposedHelpers.callMethod(decor, "isTaskMaximized"))) {
-                    return true;
-                }
-            } catch (Throwable ignored) {}
+            }
+            if (decorMaxMethod != MISSING_METHOD) {
+                try {
+                    if (Boolean.TRUE.equals(decorMaxMethod.invoke(decor))) {
+                        return true;
+                    }
+                } catch (Throwable ignored) {}
+            }
         }
         return false;
     }
@@ -625,16 +756,13 @@ public final class SystemUIWindowDecorHook {
     private static void setSurfaceCorner(Object surface, int radiusPx) {
         try {
             Object txn = newTransaction(surface);
-            if (txn == null) {
+            if (txn == null || !ensureCornerRadius(txn) || !ensureApply(txn)) {
                 return;
             }
-            Class<?> surfaceClass = Class.forName(
-                    "android.view.SurfaceControl", false, surface.getClass().getClassLoader());
-            txn.getClass().getMethod("setCornerRadius", surfaceClass, float.class)
-                    .invoke(txn, surface, Float.valueOf(radiusPx));
+            cornerRadiusMethod.invoke(txn, surface, Float.valueOf(radiusPx));
             PIN_STAMPING.set(Boolean.TRUE);
             try {
-                txn.getClass().getMethod("apply").invoke(txn);
+                applyMethod.invoke(txn);
             } finally {
                 PIN_STAMPING.set(Boolean.FALSE);
             }
@@ -953,9 +1081,7 @@ public final class SystemUIWindowDecorHook {
     };
 
     private static boolean insideWindowFullscreen() {
-        try {
-            ModConfig.reload(systemUiContext);
-        } catch (Throwable ignored) {}
+        ModConfig.ensureInitialized(systemUiContext);
         return ModConfig.isModuleEnabled(systemUiContext)
                 && ModConfig.getBoolean(systemUiContext, ModConfig.KEY_FULLSCREEN_INSIDE, true);
     }
@@ -1329,9 +1455,7 @@ public final class SystemUIWindowDecorHook {
                     if (extras == null || !extras.getBoolean("dexplus_desktop_drag", false)) {
                         return;
                     }
-                    try {
-                        ModConfig.reloadIfStale(systemUiContext, 2000L);
-                    } catch (Throwable ignored) {}
+                    ModConfig.ensureInitialized(systemUiContext);
                     if (!ModConfig.isModuleEnabled(systemUiContext)) {
                         return;
                     }
@@ -1747,15 +1871,19 @@ public final class SystemUIWindowDecorHook {
             boolean shouldSetAppBounds = XposedHelpers.getObjectField(oldInsets, "appBoundsExclusion") != null;
             Rect captionRect = new Rect(0, 0, targetBounds.width(), captionH);
             Rect exclusionRect = shouldSetAppBounds ? new Rect(targetBounds) : null;
-            Constructor<?> ctor = oldInsets.getClass().getConstructor(
-                    token.getClass(),
-                    Class.forName("android.os.Binder"),
-                    Rect.class,
-                    Rect.class,
-                    List.class,
-                    int.class,
-                    boolean.class,
-                    boolean.class);
+            Constructor<?> ctor = windowDecorInsetsCtor;
+            if (ctor == null) {
+                ctor = oldInsets.getClass().getConstructor(
+                        token.getClass(),
+                        Binder.class,
+                        Rect.class,
+                        Rect.class,
+                        List.class,
+                        int.class,
+                        boolean.class,
+                        boolean.class);
+                windowDecorInsetsCtor = ctor;
+            }
             Object newInsets = ctor.newInstance(
                     token, owner, captionRect, exclusionRect, newRects,
                     Integer.valueOf(flags), Boolean.TRUE, Boolean.valueOf(shouldSetAppBounds));
@@ -2330,9 +2458,21 @@ public final class SystemUIWindowDecorHook {
             }
             Class<?> txnClass = Class.forName(
                     "android.view.SurfaceControl$Transaction", false, loader);
+            transactionClass = txnClass;
+            Class<?> surfaceClass = Class.forName("android.view.SurfaceControl", false, loader);
             for (Method method : txnClass.getDeclaredMethods()) {
-                if ("apply".equals(method.getName())) {
+                String name = method.getName();
+                Class<?>[] params = method.getParameterTypes();
+                if ("apply".equals(name) && params.length == 0) {
                     XposedBridge.hookMethod(method, STAMP_PIN_ON_APPLY);
+                    hooked++;
+                } else if ("setAlpha".equals(name) && params.length == 2
+                        && params[0] == surfaceClass && params[1] == float.class) {
+                    XposedBridge.hookMethod(method, GUARD_TASK_ALPHA);
+                    hooked++;
+                } else if ("setLayer".equals(name) && params.length == 2
+                        && params[0] == surfaceClass && params[1] == int.class) {
+                    XposedBridge.hookMethod(method, GUARD_PIN_LAYER);
                     hooked++;
                 }
             }
@@ -2399,6 +2539,9 @@ public final class SystemUIWindowDecorHook {
             }
             try {
                 noteFront(param.args[0]);
+                if (!WINDOW_ALPHA.isEmpty()) {
+                    restampWindowAlphas();
+                }
                 if (PINNED_IDS.isEmpty()) {
                     return;
                 }
@@ -2429,6 +2572,9 @@ public final class SystemUIWindowDecorHook {
     private static final XC_MethodHook RAISE_PINS_AFTER_TRANSITION = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
+            if (!WINDOW_ALPHA.isEmpty()) {
+                restampWindowAlphas();
+            }
             if (PINNED_IDS.isEmpty()) {
                 return;
             }
@@ -2436,26 +2582,70 @@ public final class SystemUIWindowDecorHook {
         }
     };
 
+    private static final XC_MethodHook GUARD_TASK_ALPHA = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (Boolean.TRUE.equals(PIN_STAMPING.get())
+                    || WINDOW_ALPHA.isEmpty()
+                    || param.args == null || param.args.length < 2
+                    || param.args[0] == null) {
+                return;
+            }
+            TaskChrome chrome = SURFACE_TO_TASK.get(param.args[0]);
+            if (chrome == null) {
+                return;
+            }
+            Float target = WINDOW_ALPHA.get(Integer.valueOf(chrome.id));
+            if (target != null) {
+                param.args[1] = target;
+            }
+        }
+    };
+
+    private static final XC_MethodHook GUARD_PIN_LAYER = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (Boolean.TRUE.equals(PIN_STAMPING.get())
+                    || PINNED_IDS.isEmpty()
+                    || param.args == null || param.args.length < 2
+                    || param.args[0] == null) {
+                return;
+            }
+            TaskChrome chrome = SURFACE_TO_TASK.get(param.args[0]);
+            if (chrome == null) {
+                return;
+            }
+            Integer id = Integer.valueOf(chrome.id);
+            if (PINNED_IDS.contains(id)) {
+                param.args[1] = Integer.valueOf(1000000);
+            }
+        }
+    };
+
     private static final XC_MethodHook STAMP_PIN_ON_APPLY = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (Boolean.TRUE.equals(PIN_STAMPING.get())) {
+            Object[] pins = pinnedTaskSurfaces;
+            if (pins.length == 0
+                    || Boolean.TRUE.equals(PIN_STAMPING.get())
+                    || Boolean.TRUE.equals(SKIP_PIN_STAMP_THREAD.get())) {
                 return;
             }
-            boolean pins = !PINNED_IDS.isEmpty();
-            boolean faded = !WINDOW_ALPHA.isEmpty();
-            if (!pins && !faded) {
+            if (!ensureRelativeLayer(param.thisObject) || layerMethod == null) {
                 return;
             }
             PIN_STAMPING.set(Boolean.TRUE);
             try {
-                if (pins) {
-                    stampPin(param.thisObject, pinOrderCover);
+                for (int i = 0; i < pins.length; i++) {
+                    Integer lvl = i < PIN_LEVELS.length ? PIN_LEVELS[i] : Integer.valueOf(1000000 + i);
+                    try {
+                        layerMethod.invoke(param.thisObject, pins[i], lvl);
+                    } catch (Throwable ignored) {}
                 }
-                if (faded) {
-                    stampWindowAlpha(param.thisObject);
+                if (!loggedPinRaise) {
+                    loggedPinRaise = true;
+                    XposedBridge.log(TAG + ": pinned windows kept above");
                 }
-            } catch (Throwable ignored) {
             } finally {
                 PIN_STAMPING.set(Boolean.FALSE);
             }
@@ -2470,10 +2660,16 @@ public final class SystemUIWindowDecorHook {
             }
             Integer id = taskId(param.args[0]);
             if (id != null) {
-                PINNED_IDS.remove(id);
-                TASK_CHROME.remove(id);
+                boolean wasPinned = PINNED_IDS.remove(id);
+                TaskChrome removed = TASK_CHROME.remove(id);
+                if (removed != null && removed.task != null) {
+                    SURFACE_TO_TASK.remove(removed.task, removed);
+                }
                 WINDOW_ALPHA.remove(id);
                 ALPHA_MANUAL.remove(id);
+                if (wasPinned) {
+                    refreshPinnedSurfaces();
+                }
                 if (!PINNED_IDS.isEmpty()) {
                     applyPinOrder(pinOrderCover);
                 }
@@ -2511,7 +2707,10 @@ public final class SystemUIWindowDecorHook {
         View pin = findPin(group);
         boolean wantPin = on && ModConfig.getBoolean(ctx, ModConfig.KEY_PIN_BUTTON_ENABLED, true);
         if (!wantPin) {
-            PINNED_IDS.clear();
+            if (!PINNED_IDS.isEmpty()) {
+                PINNED_IDS.clear();
+                refreshPinnedSurfaces();
+            }
             if (!on) {
                 resetWindowAlphas();
             }
@@ -2588,15 +2787,9 @@ public final class SystemUIWindowDecorHook {
             return;
         }
         Object listener = field(decor, "mOnCaptionLongClickListener");
-        if (listener == null) {
-            return;
+        if (listener instanceof View.OnLongClickListener) {
+            holdTarget.setOnLongClickListener((View.OnLongClickListener) listener);
         }
-        try {
-            Method set = holdTarget.getClass().getMethod(
-                    "setOnLongClickListener",
-                    Class.forName("android.view.View$OnLongClickListener"));
-            set.invoke(holdTarget, listener);
-        } catch (Throwable ignored) {}
     }
 
     private static void updateMaximizeTooltip(Object decor, View button, boolean holdFullscreen) {
@@ -3249,13 +3442,13 @@ public final class SystemUIWindowDecorHook {
         }
         try {
             Object txn = newTransaction(chrome.task);
-            if (txn == null || !ensureAlpha(txn)) {
+            if (txn == null || !ensureAlpha(txn) || !ensureApply(txn)) {
                 return;
             }
             PIN_STAMPING.set(Boolean.TRUE);
             try {
                 alphaMethod.invoke(txn, chrome.task, Float.valueOf(alpha));
-                txn.getClass().getMethod("apply").invoke(txn);
+                applyMethod.invoke(txn);
             } finally {
                 PIN_STAMPING.set(Boolean.FALSE);
             }
@@ -3264,38 +3457,49 @@ public final class SystemUIWindowDecorHook {
         }
     }
 
-    private static void stampWindowAlpha(Object txn) {
-        if (txn == null || WINDOW_ALPHA.isEmpty() || !ensureAlpha(txn)) {
+    private static void restampWindowAlphas() {
+        if (WINDOW_ALPHA.isEmpty()) {
             return;
         }
         ArrayList<Integer> ids = new ArrayList<Integer>();
         ArrayList<Float> values = new ArrayList<Float>();
         synchronized (WINDOW_ALPHA) {
+            if (WINDOW_ALPHA.isEmpty()) {
+                return;
+            }
             for (Map.Entry<Integer, Float> entry : WINDOW_ALPHA.entrySet()) {
                 ids.add(entry.getKey());
                 values.add(entry.getValue());
             }
         }
-        ArrayList<TaskChrome> windows = new ArrayList<TaskChrome>();
-        synchronized (TASK_CHROME) {
-            windows.addAll(TASK_CHROME.values());
-        }
+        Object txn = null;
         try {
-            for (int i = 0; i < ids.size(); i++) {
-                Object surface = null;
-                int id = ids.get(i).intValue();
-                for (int j = 0; j < windows.size(); j++) {
-                    TaskChrome chrome = windows.get(j);
-                    if (chrome.id == id && surfaceValid(chrome.task)) {
-                        surface = chrome.task;
-                        break;
+            boolean stamped = false;
+            PIN_STAMPING.set(Boolean.TRUE);
+            try {
+                for (int i = 0; i < ids.size(); i++) {
+                    TaskChrome chrome = TASK_CHROME.get(ids.get(i));
+                    if (chrome == null || !surfaceValid(chrome.task)) {
+                        continue;
                     }
+                    if (txn == null) {
+                        txn = newTransaction(chrome.task);
+                        if (txn == null || !ensureAlpha(txn) || !ensureApply(txn)) {
+                            return;
+                        }
+                    }
+                    alphaMethod.invoke(txn, chrome.task, values.get(i));
+                    stamped = true;
                 }
-                if (surface != null) {
-                    alphaMethod.invoke(txn, surface, values.get(i));
+                if (stamped && txn != null) {
+                    applyMethod.invoke(txn);
                 }
+            } finally {
+                PIN_STAMPING.set(Boolean.FALSE);
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+            PIN_STAMPING.set(Boolean.FALSE);
+        }
     }
 
     private static void resetWindowAlphas() {
@@ -3308,8 +3512,33 @@ public final class SystemUIWindowDecorHook {
             WINDOW_ALPHA.clear();
         }
         ALPHA_MANUAL.clear();
-        for (int i = 0; i < ids.size(); i++) {
-            setWindowAlpha(ids.get(i).intValue(), 1f);
+        Object txn = null;
+        try {
+            boolean stamped = false;
+            PIN_STAMPING.set(Boolean.TRUE);
+            try {
+                for (int i = 0; i < ids.size(); i++) {
+                    TaskChrome chrome = TASK_CHROME.get(ids.get(i));
+                    if (chrome == null || !surfaceValid(chrome.task)) {
+                        continue;
+                    }
+                    if (txn == null) {
+                        txn = newTransaction(chrome.task);
+                        if (txn == null || !ensureAlpha(txn) || !ensureApply(txn)) {
+                            return;
+                        }
+                    }
+                    alphaMethod.invoke(txn, chrome.task, Float.valueOf(1f));
+                    stamped = true;
+                }
+                if (stamped && txn != null) {
+                    applyMethod.invoke(txn);
+                }
+            } finally {
+                PIN_STAMPING.set(Boolean.FALSE);
+            }
+        } catch (Throwable ignored) {
+            PIN_STAMPING.set(Boolean.FALSE);
         }
     }
 
@@ -3727,9 +3956,11 @@ public final class SystemUIWindowDecorHook {
             boolean pinned = PINNED_IDS.contains(id);
             if (pinned) {
                 PINNED_IDS.remove(id);
+                refreshPinnedSurfaces();
                 releasePinLayer(decor);
             } else {
                 PINNED_IDS.add(id);
+                refreshPinnedSurfaces();
                 raisePinned(null);
             }
             paintPin(button, !pinned);
@@ -3835,7 +4066,15 @@ public final class SystemUIWindowDecorHook {
         }
         Object task = field(decor, "mTaskSurface");
         if (surfaceValid(task)) {
+            boolean changed = chrome.task != task;
+            if (chrome.task != null && changed) {
+                SURFACE_TO_TASK.remove(chrome.task, chrome);
+            }
             chrome.task = task;
+            SURFACE_TO_TASK.put(task, chrome);
+            if (changed && PINNED_IDS.contains(id)) {
+                refreshPinnedSurfaces();
+            }
         }
         Object container = field(decor, "mDecorationContainerSurface");
         if (surfaceValid(container)) {
@@ -3866,7 +4105,13 @@ public final class SystemUIWindowDecorHook {
             return null;
         }
         if (!surfaceValid(chrome.task)) {
+            if (chrome.task != null) {
+                SURFACE_TO_TASK.remove(chrome.task, chrome);
+            }
             chrome.task = null;
+            if (PINNED_IDS.contains(id)) {
+                refreshPinnedSurfaces();
+            }
             return null;
         }
         return chrome.task;
@@ -3877,7 +4122,12 @@ public final class SystemUIWindowDecorHook {
             return false;
         }
         try {
-            Object value = surface.getClass().getMethod("isValid").invoke(surface);
+            Method validMethod = surfaceIsValidMethod;
+            if (validMethod == null) {
+                validMethod = surface.getClass().getMethod("isValid");
+                surfaceIsValidMethod = validMethod;
+            }
+            Object value = validMethod.invoke(surface);
             return !Boolean.FALSE.equals(value);
         } catch (Throwable error) {
             return true;
@@ -3922,34 +4172,61 @@ public final class SystemUIWindowDecorHook {
         if (PINNED_IDS.isEmpty()) {
             return;
         }
-        ArrayList<TaskChrome> windows = new ArrayList<TaskChrome>();
-        synchronized (TASK_CHROME) {
-            windows.addAll(TASK_CHROME.values());
-        }
-        Object sample = pinnedSurface(windows);
-        if (sample == null) {
+        ArrayList<TaskChrome> pins = collectPinnedChrome();
+        if (pins.isEmpty()) {
             return;
         }
+        Object sample = pins.get(0).task;
         try {
             Object txn = newTransaction(sample);
-            if (txn == null || !orderPins(txn, windows)) {
+            if (txn == null || !ensureApply(txn) || !orderPins(txn, pins)) {
                 return;
             }
-            txn.getClass().getMethod("apply").invoke(txn);
-        } catch (Throwable ignored) {}
+            PIN_STAMPING.set(Boolean.TRUE);
+            try {
+                applyMethod.invoke(txn);
+            } finally {
+                PIN_STAMPING.set(Boolean.FALSE);
+            }
+        } catch (Throwable ignored) {
+            PIN_STAMPING.set(Boolean.FALSE);
+        }
     }
 
-    private static void stampPin(Object txn, Object preferred) {
-        if (txn == null || PINNED_IDS.isEmpty() || !ensureRelativeLayer(txn)) {
+    private static void refreshPinnedSurfaces() {
+        if (PINNED_IDS.isEmpty()) {
+            pinnedTaskSurfaces = new Object[0];
             return;
         }
-        ArrayList<TaskChrome> windows = new ArrayList<TaskChrome>();
-        synchronized (TASK_CHROME) {
-            windows.addAll(TASK_CHROME.values());
+        ArrayList<TaskChrome> pins = collectPinnedChrome();
+        Object[] arr = new Object[pins.size()];
+        for (int i = 0; i < pins.size(); i++) {
+            arr[i] = pins.get(i).task;
         }
-        try {
-            orderPins(txn, windows);
-        } catch (Throwable ignored) {}
+        pinnedTaskSurfaces = arr;
+    }
+
+    private static ArrayList<TaskChrome> collectPinnedChrome() {
+        ArrayList<Integer> ids = new ArrayList<Integer>();
+        synchronized (PINNED_IDS) {
+            ids.addAll(PINNED_IDS);
+        }
+        ArrayList<TaskChrome> pins = new ArrayList<TaskChrome>(ids.size());
+        for (int i = 0; i < ids.size(); i++) {
+            TaskChrome chrome = TASK_CHROME.get(ids.get(i));
+            if (chrome != null && surfaceValid(chrome.task)) {
+                pins.add(chrome);
+            }
+        }
+        if (pins.size() > 1) {
+            Collections.sort(pins, new Comparator<TaskChrome>() {
+                @Override
+                public int compare(TaskChrome a, TaskChrome b) {
+                    return Integer.compare(a.id, b.id);
+                }
+            });
+        }
+        return pins;
     }
 
     private static void noteFront(Object taskInfo) {
@@ -3965,38 +4242,9 @@ public final class SystemUIWindowDecorHook {
         chrome.front = ++nextFrontRank;
     }
 
-    private static Object pinnedSurface(ArrayList<TaskChrome> windows) {
-        for (int i = 0; i < windows.size(); i++) {
-            TaskChrome chrome = windows.get(i);
-            if (PINNED_IDS.contains(Integer.valueOf(chrome.id)) && surfaceValid(chrome.task)) {
-                return chrome.task;
-            }
-        }
-        return null;
-    }
-
-    private static boolean orderPins(Object txn, ArrayList<TaskChrome> windows) throws Throwable {
-        if (layerMethod == null) {
+    private static boolean orderPins(Object txn, ArrayList<TaskChrome> pins) throws Throwable {
+        if (layerMethod == null || pins.isEmpty()) {
             return false;
-        }
-        ArrayList<TaskChrome> pins = new ArrayList<TaskChrome>();
-        for (int i = 0; i < windows.size(); i++) {
-            TaskChrome chrome = windows.get(i);
-            if (PINNED_IDS.contains(Integer.valueOf(chrome.id)) && surfaceValid(chrome.task)) {
-                pins.add(chrome);
-            }
-        }
-        if (pins.isEmpty()) {
-            return false;
-        }
-        for (int i = 0; i < pins.size(); i++) {
-            for (int j = i + 1; j < pins.size(); j++) {
-                if (pins.get(j).id < pins.get(i).id) {
-                    TaskChrome swap = pins.get(i);
-                    pins.set(i, pins.get(j));
-                    pins.set(j, swap);
-                }
-            }
         }
         int level = 1000000;
         for (int i = 0; i < pins.size(); i++) {
@@ -4020,10 +4268,15 @@ public final class SystemUIWindowDecorHook {
             if (surfaceValid(task)) {
                 ensureRelativeLayer(task);
                 Object txn = newTransaction(task);
-                if (txn != null && layerMethod != null) {
+                if (txn != null && layerMethod != null && ensureApply(txn)) {
                     // Place just above normal task layers before WM natively reassigns child layers
-                    layerMethod.invoke(txn, task, Integer.valueOf(20000));
-                    txn.getClass().getMethod("apply").invoke(txn);
+                    PIN_STAMPING.set(Boolean.TRUE);
+                    try {
+                        layerMethod.invoke(txn, task, Integer.valueOf(20000));
+                        applyMethod.invoke(txn);
+                    } finally {
+                        PIN_STAMPING.set(Boolean.FALSE);
+                    }
                 }
             }
 
@@ -4050,20 +4303,52 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static boolean ensureRelativeLayer(Object sample) {
-        if (relativeLayerMethod != null) {
+        if (relativeLayerMethod != null && layerMethod != null) {
             return true;
         }
         try {
             ClassLoader loader = sample.getClass().getClassLoader();
             Class<?> surfaceClass = Class.forName("android.view.SurfaceControl", false, loader);
-            Class<?> txnClass = Class.forName(
-                    "android.view.SurfaceControl$Transaction", false, loader);
+            Class<?> txnClass = transactionClass != null
+                    ? transactionClass
+                    : Class.forName("android.view.SurfaceControl$Transaction", false, loader);
+            transactionClass = txnClass;
             relativeLayerMethod = txnClass.getMethod(
                     "setRelativeLayer", surfaceClass, surfaceClass, int.class);
             layerMethod = txnClass.getMethod("setLayer", surfaceClass, int.class);
             if (transactionCtor == null) {
                 transactionCtor = txnClass.getDeclaredConstructor();
             }
+            return true;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    private static boolean ensureApply(Object txn) {
+        if (applyMethod != null) {
+            return true;
+        }
+        try {
+            Class<?> txnClass = transactionClass != null ? transactionClass : txn.getClass();
+            transactionClass = txnClass;
+            applyMethod = txnClass.getMethod("apply");
+            return true;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    private static boolean ensureCornerRadius(Object txn) {
+        if (cornerRadiusMethod != null) {
+            return true;
+        }
+        try {
+            ClassLoader loader = txn.getClass().getClassLoader();
+            Class<?> surfaceClass = Class.forName("android.view.SurfaceControl", false, loader);
+            Class<?> txnClass = transactionClass != null ? transactionClass : txn.getClass();
+            transactionClass = txnClass;
+            cornerRadiusMethod = txnClass.getMethod("setCornerRadius", surfaceClass, float.class);
             return true;
         } catch (Throwable error) {
             return false;
@@ -4106,47 +4391,53 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void matchPinColor(View source, ImageView pin) {
+        if (source == null || pin == null) {
+            return;
+        }
+        if (source instanceof ImageView) {
+            ColorStateList tint = ((ImageView) source).getImageTintList();
+            if (tint == null) {
+                return;
+            }
+            int[] state = source.getDrawableState();
+            int color = tint.getColorForState(state, 0xFFFFFFFF);
+            pin.setImageTintList(ColorStateList.valueOf(color));
+            return;
+        }
         try {
             Object tint = source.getClass().getMethod("getImageTintList").invoke(source);
             if (tint == null) {
                 return;
             }
-            int[] state = (int[]) source.getClass().getMethod("getDrawableState").invoke(source);
-            int color = ((Integer) tint.getClass()
-                    .getMethod("getColorForState", int[].class, int.class)
-                    .invoke(tint, state, Integer.valueOf(0xFFFFFFFF))).intValue();
-            Class<?> tintList = Class.forName("android.content.res.ColorStateList");
-            Object solid = tintList.getMethod("valueOf", int.class).invoke(null, Integer.valueOf(color));
-            pin.getClass().getMethod("setImageTintList", tintList).invoke(pin, solid);
+            int[] state = source.getDrawableState();
+            int color = ((ColorStateList) tint).getColorForState(state, 0xFFFFFFFF);
+            pin.setImageTintList(ColorStateList.valueOf(color));
         } catch (Throwable ignored) {}
     }
 
     private static void setPinHover(View button, String label) {
-        Class<?> type = button.getClass();
-        while (type != null) {
-            try {
-                Method tooltip = type.getDeclaredMethod("setTooltipText", CharSequence.class);
-                tooltip.setAccessible(true);
-                tooltip.invoke(button, label);
-                break;
-            } catch (NoSuchMethodException missing) {
-                type = type.getSuperclass();
-            } catch (Throwable ignored) {
-                break;
+        button.setTooltipText(label);
+        Class<?> cls = button.getClass();
+        Method hover = SEM_HOVER_METHOD_CACHE.get(cls);
+        if (hover == null) {
+            Class<?> type = cls;
+            while (type != null) {
+                try {
+                    hover = type.getDeclaredMethod("semSetHoverPopupType", int.class);
+                    hover.setAccessible(true);
+                    break;
+                } catch (NoSuchMethodException missing) {
+                    type = type.getSuperclass();
+                } catch (Throwable ignored) {
+                    break;
+                }
             }
+            SEM_HOVER_METHOD_CACHE.put(cls, hover != null ? hover : MISSING_METHOD);
         }
-        type = button.getClass();
-        while (type != null) {
+        if (hover != null && hover != MISSING_METHOD) {
             try {
-                Method hover = type.getDeclaredMethod("semSetHoverPopupType", int.class);
-                hover.setAccessible(true);
                 hover.invoke(button, Integer.valueOf(0));
-                break;
-            } catch (NoSuchMethodException missing) {
-                type = type.getSuperclass();
-            } catch (Throwable ignored) {
-                break;
-            }
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -4441,21 +4732,45 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static Object field(Object target, String name) {
-        if (target == null) {
+        if (target == null || name == null) {
             return null;
         }
-        Class<?> type = target.getClass();
-        while (type != null) {
-            try {
-                Field found = type.getDeclaredField(name);
-                found.setAccessible(true);
-                return found.get(target);
-            } catch (NoSuchFieldException missing) {
-                type = type.getSuperclass();
-            } catch (Throwable error) {
+        Class<?> cls = target.getClass();
+        ConcurrentHashMap<String, Field> classFields = FIELD_CACHE.get(cls);
+        if (classFields == null) {
+            classFields = new ConcurrentHashMap<String, Field>();
+            ConcurrentHashMap<String, Field> prev = FIELD_CACHE.putIfAbsent(cls, classFields);
+            if (prev != null) {
+                classFields = prev;
+            }
+        }
+        Field cached = classFields.get(name);
+        if (cached == MISSING_FIELD) {
+            return null;
+        }
+        if (cached == null) {
+            Class<?> type = cls;
+            while (type != null) {
+                try {
+                    cached = type.getDeclaredField(name);
+                    cached.setAccessible(true);
+                    break;
+                } catch (NoSuchFieldException missing) {
+                    type = type.getSuperclass();
+                } catch (Throwable error) {
+                    cached = null;
+                    break;
+                }
+            }
+            classFields.putIfAbsent(name, cached != null ? cached : MISSING_FIELD);
+            if (cached == null) {
                 return null;
             }
         }
-        return null;
+        try {
+            return cached.get(target);
+        } catch (Throwable error) {
+            return null;
+        }
     }
 }

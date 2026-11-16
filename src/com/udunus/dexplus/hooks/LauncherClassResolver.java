@@ -1,8 +1,16 @@
 package com.udunus.dexplus.hooks;
 
+import android.content.pm.ApplicationInfo;
+
 import com.udunus.dexplus.util.ModConfig;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -86,14 +94,36 @@ public final class LauncherClassResolver {
         public String batteryDrawableClass;
         public String batteryCoroutineClass;
         public final Set<String> dexUiPackagePrefixes = new HashSet<String>();
+        public volatile String[] dexUiPrefixArray;
+
+        public String[] getDexUiPrefixArray() {
+            String[] cached = dexUiPrefixArray;
+            if (cached == null && !dexUiPackagePrefixes.isEmpty()) {
+                cached = dexUiPackagePrefixes.toArray(new String[dexUiPackagePrefixes.size()]);
+                dexUiPrefixArray = cached;
+            }
+            return cached;
+        }
     }
+
+    private static final int CACHE_VERSION = 1;
+    private static final String CACHE_FILE_NAME = "dexplus_class_cache_v1.json";
 
     private static volatile ResolvedClasses sCached;
     private static volatile String sCachedApkPath;
 
     private LauncherClassResolver() {}
 
+    public static ResolvedClasses resolve(ApplicationInfo appInfo) {
+        String apkPath = appInfo != null ? appInfo.sourceDir : null;
+        return resolve(apkPath, appInfo);
+    }
+
     public static ResolvedClasses resolve(String apkPath) {
+        return resolve(apkPath, null);
+    }
+
+    private static ResolvedClasses resolve(String apkPath, ApplicationInfo appInfo) {
         ResolvedClasses existing = sCached;
         if (existing != null && (apkPath == null || apkPath.equals(sCachedApkPath))) {
             return existing;
@@ -102,11 +132,29 @@ public final class LauncherClassResolver {
             if (sCached != null && (apkPath == null || apkPath.equals(sCachedApkPath))) {
                 return sCached;
             }
+            File cacheFile = resolveCacheFile(appInfo);
+            if (apkPath != null && !apkPath.isEmpty() && cacheFile != null) {
+                long cacheStartNs = System.nanoTime();
+                ResolvedClasses disk = loadFromDiskCache(cacheFile, apkPath);
+                if (disk != null) {
+                    long elapsedMs = (System.nanoTime() - cacheStartNs) / 1_000_000L;
+                    XposedBridge.log(TAG + ": launcher class cache hit in " + elapsedMs + "ms"
+                            + " (taskbarPkg=" + disk.taskbarPackagePrefix
+                            + ", panelMgr=" + disk.dexPanelManagerClass + ")");
+                    sCachedApkPath = apkPath;
+                    sCached = disk;
+                    return disk;
+                }
+            }
             ResolvedClasses result = new ResolvedClasses();
             if (apkPath != null && !apkPath.isEmpty()) {
                 long startNs = System.nanoTime();
                 try {
                     scanApk(apkPath, result);
+                    result.getDexUiPrefixArray();
+                    if (cacheFile != null && !result.taskbarPackageClasses.isEmpty()) {
+                        saveToDiskCache(cacheFile, apkPath, result);
+                    }
                 } catch (Throwable error) {
                     XposedBridge.log(TAG + ": launcher DEX scan failed: " + error);
                 }
@@ -119,6 +167,141 @@ public final class LauncherClassResolver {
             sCachedApkPath = apkPath;
             sCached = result;
             return result;
+        }
+    }
+
+    private static File resolveCacheFile(ApplicationInfo appInfo) {
+        if (appInfo == null) return null;
+        String[] candidates = new String[] { appInfo.dataDir, appInfo.deviceProtectedDataDir };
+        for (int i = 0; i < candidates.length; i++) {
+            String base = candidates[i];
+            if (base == null || base.isEmpty()) continue;
+            File baseDir = new File(base);
+            if (!baseDir.exists() || !baseDir.canWrite()) continue;
+            File cacheDir = new File(baseDir, "cache");
+            if (!cacheDir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                cacheDir.mkdirs();
+            }
+            if (cacheDir.isDirectory() && cacheDir.canWrite()) {
+                return new File(cacheDir, CACHE_FILE_NAME);
+            }
+        }
+        return null;
+    }
+
+    private static ResolvedClasses loadFromDiskCache(File cacheFile, String apkPath) {
+        if (cacheFile == null || !cacheFile.isFile()) return null;
+        try {
+            File apkFile = new File(apkPath);
+            long mtime = apkFile.lastModified();
+            long len = apkFile.length();
+            if (mtime <= 0L || len <= 0L) return null;
+
+            long size = cacheFile.length();
+            if (size <= 0L || size > 1_048_576L) return null;
+            byte[] buf = new byte[(int) size];
+            int pos = 0;
+            FileInputStream in = new FileInputStream(cacheFile);
+            try {
+                while (pos < buf.length) {
+                    int n = in.read(buf, pos, buf.length - pos);
+                    if (n < 0) break;
+                    pos += n;
+                }
+            } finally {
+                in.close();
+            }
+            JSONObject json = new JSONObject(new String(buf, 0, pos, StandardCharsets.UTF_8));
+            if (json.optInt("version", -1) != CACHE_VERSION) return null;
+            if (!apkPath.equals(json.optString("apkPath", ""))) return null;
+            if (json.optLong("apkMtime", -1L) != mtime || json.optLong("apkSize", -1L) != len) {
+                return null;
+            }
+            ResolvedClasses out = new ResolvedClasses();
+            out.homeContextClickClass = emptyToNull(json.optString("homeContextClickClass", null));
+            out.keyGestureHandlerClass = emptyToNull(json.optString("keyGestureHandlerClass", null));
+            readStringCollection(json.optJSONArray("touchControllerClasses"), out.touchControllerClasses);
+            out.taskbarHoneyPotClass = emptyToNull(json.optString("taskbarHoneyPotClass", null));
+            out.taskbarPackagePrefix = emptyToNull(json.optString("taskbarPackagePrefix", null));
+            readStringCollection(json.optJSONArray("taskbarPackageClasses"), out.taskbarPackageClasses);
+            readStringCollection(json.optJSONArray("taskbarCoroutineClasses"), out.taskbarCoroutineClasses);
+            out.statusPanelBindingClass = emptyToNull(json.optString("statusPanelBindingClass", null));
+            out.taskbarBindingClass = emptyToNull(json.optString("taskbarBindingClass", null));
+            out.notificationRepoClass = emptyToNull(json.optString("notificationRepoClass", null));
+            out.notificationCountMethod = emptyToNull(json.optString("notificationCountMethod", null));
+            out.notificationPublishMethod = emptyToNull(json.optString("notificationPublishMethod", null));
+            out.dexPanelManagerClass = emptyToNull(json.optString("dexPanelManagerClass", null));
+            out.dexPanelEnumClass = emptyToNull(json.optString("dexPanelEnumClass", null));
+            readStringCollection(json.optJSONArray("dexPanelToggleMethods"), out.dexPanelToggleMethods);
+            out.batteryDrawableClass = emptyToNull(json.optString("batteryDrawableClass", null));
+            out.batteryCoroutineClass = emptyToNull(json.optString("batteryCoroutineClass", null));
+            readStringCollection(json.optJSONArray("dexUiPackagePrefixes"), out.dexUiPackagePrefixes);
+            out.getDexUiPrefixArray();
+            if (out.taskbarPackageClasses.isEmpty()) return null;
+            return out;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void saveToDiskCache(File cacheFile, String apkPath, ResolvedClasses res) {
+        try {
+            File apkFile = new File(apkPath);
+            long mtime = apkFile.lastModified();
+            long len = apkFile.length();
+            if (mtime <= 0L || len <= 0L) return;
+
+            JSONObject json = new JSONObject();
+            json.put("version", CACHE_VERSION);
+            json.put("apkPath", apkPath);
+            json.put("apkMtime", mtime);
+            json.put("apkSize", len);
+            json.put("homeContextClickClass", res.homeContextClickClass);
+            json.put("keyGestureHandlerClass", res.keyGestureHandlerClass);
+            json.put("touchControllerClasses", new JSONArray(res.touchControllerClasses));
+            json.put("taskbarHoneyPotClass", res.taskbarHoneyPotClass);
+            json.put("taskbarPackagePrefix", res.taskbarPackagePrefix);
+            json.put("taskbarPackageClasses", new JSONArray(res.taskbarPackageClasses));
+            json.put("taskbarCoroutineClasses", new JSONArray(res.taskbarCoroutineClasses));
+            json.put("statusPanelBindingClass", res.statusPanelBindingClass);
+            json.put("taskbarBindingClass", res.taskbarBindingClass);
+            json.put("notificationRepoClass", res.notificationRepoClass);
+            json.put("notificationCountMethod", res.notificationCountMethod);
+            json.put("notificationPublishMethod", res.notificationPublishMethod);
+            json.put("dexPanelManagerClass", res.dexPanelManagerClass);
+            json.put("dexPanelEnumClass", res.dexPanelEnumClass);
+            json.put("dexPanelToggleMethods", new JSONArray(res.dexPanelToggleMethods));
+            json.put("batteryDrawableClass", res.batteryDrawableClass);
+            json.put("batteryCoroutineClass", res.batteryCoroutineClass);
+            json.put("dexUiPackagePrefixes", new JSONArray(res.dexUiPackagePrefixes));
+
+            File tmp = new File(cacheFile.getParentFile(), CACHE_FILE_NAME + ".tmp");
+            byte[] payload = json.toString().getBytes(StandardCharsets.UTF_8);
+            FileOutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(payload);
+            } finally {
+                out.close();
+            }
+            if (!tmp.renameTo(cacheFile)) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static String emptyToNull(String s) {
+        return (s == null || s.isEmpty() || "null".equals(s)) ? null : s;
+    }
+
+    private static void readStringCollection(JSONArray arr, java.util.Collection<String> dest) {
+        if (arr == null || dest == null) return;
+        for (int i = 0; i < arr.length(); i++) {
+            String s = arr.optString(i, null);
+            if (s != null && !s.isEmpty()) {
+                dest.add(s);
+            }
         }
     }
 
@@ -425,7 +608,23 @@ public final class LauncherClassResolver {
         long size = entry.getSize();
         InputStream in = zip.getInputStream(entry);
         try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream(size > 0 && size < 32_000_000 ? (int) size : 65536);
+            if (size > 0 && size < 32_000_000) {
+                int len = (int) size;
+                byte[] exact = new byte[len];
+                int pos = 0;
+                while (pos < len) {
+                    int n = in.read(exact, pos, len - pos);
+                    if (n < 0) break;
+                    pos += n;
+                }
+                if (pos == len) {
+                    return exact;
+                }
+                byte[] trimmed = new byte[pos];
+                System.arraycopy(exact, 0, trimmed, 0, pos);
+                return trimmed;
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream(65536);
             byte[] buf = new byte[32768];
             int n;
             while ((n = in.read(buf)) >= 0) {
