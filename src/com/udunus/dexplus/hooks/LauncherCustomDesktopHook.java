@@ -129,8 +129,11 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class LauncherCustomDesktopHook {
-    private static final String TAG_DEX_DESKTOP_VIEW = "minsos_custom_dex_desktop";
-    private static final String DESKTOP_PREFS = "minsos_dex_desktop_shortcuts";
+    private static final String TAG_DEX_DESKTOP_VIEW = "dexplus_custom_dex_desktop";
+    private static final String DESKTOP_PREFS = "dexplus_desktop_shortcuts";
+    private static final String LEGACY_DESKTOP_PREFS = "minsos_dex_desktop_shortcuts";
+    private static final String KEY_LEGACY_DESKTOP_PREFS_MIGRATED = "_migrated_legacy_desktop_prefs_v1";
+    private static volatile boolean legacyDesktopPrefsMigrated;
     private static final String KEY_SHORTCUT_LIST = "shortcut_components_v1";
     private static final String KEY_SHORTCUT_POSITIONS = "shortcut_positions_v1";
     private static final String CUSTOM_SHORTCUT_PREFIX = "sc:";
@@ -3906,7 +3909,53 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static SharedPreferences getDesktopPrefs(Context context) {
-        return context.getSharedPreferences(DESKTOP_PREFS, Context.MODE_PRIVATE);
+        SharedPreferences prefs = context.getSharedPreferences(DESKTOP_PREFS, Context.MODE_PRIVATE);
+        if (!legacyDesktopPrefsMigrated) {
+            synchronized (LauncherCustomDesktopHook.class) {
+                if (!legacyDesktopPrefsMigrated) {
+                    migrateLegacyDesktopPrefs(context, prefs);
+                    legacyDesktopPrefsMigrated = true;
+                }
+            }
+        }
+        return prefs;
+    }
+
+    /**
+     * One-time migration from the legacy minsos_dex_desktop_shortcuts preferences file
+     * so existing desktop shortcuts and icon positions are preserved across updates.
+     */
+    @SuppressWarnings("unchecked")
+    private static void migrateLegacyDesktopPrefs(Context context, SharedPreferences target) {
+        if (target.getBoolean(KEY_LEGACY_DESKTOP_PREFS_MIGRATED, false)) {
+            return;
+        }
+        SharedPreferences legacy = context.getSharedPreferences(LEGACY_DESKTOP_PREFS, Context.MODE_PRIVATE);
+        Map<String, ?> all = legacy.getAll();
+        SharedPreferences.Editor editor = target.edit();
+        if (all != null && !all.isEmpty()) {
+            for (Map.Entry<String, ?> entry : all.entrySet()) {
+                String key = entry.getKey();
+                Object val = entry.getValue();
+                if (key == null || val == null || target.contains(key)) {
+                    continue;
+                }
+                if (val instanceof String) {
+                    editor.putString(key, (String) val);
+                } else if (val instanceof Boolean) {
+                    editor.putBoolean(key, ((Boolean) val).booleanValue());
+                } else if (val instanceof Integer) {
+                    editor.putInt(key, ((Integer) val).intValue());
+                } else if (val instanceof Long) {
+                    editor.putLong(key, ((Long) val).longValue());
+                } else if (val instanceof Float) {
+                    editor.putFloat(key, ((Float) val).floatValue());
+                } else if (val instanceof Set<?>) {
+                    editor.putStringSet(key, new LinkedHashSet<>((Set<String>) val));
+                }
+            }
+        }
+        editor.putBoolean(KEY_LEGACY_DESKTOP_PREFS_MIGRATED, true).commit();
     }
 
     private static boolean isFileBasedDesktop(Context context) {

@@ -35,9 +35,8 @@ import org.json.JSONObject;
 import de.robv.android.xposed.XSharedPreferences;
 
 public final class ModConfig {
-    public static final String TAG = "MinsOSInternalDex";
+    public static final String TAG = "DexPlus";
     public static final String MODULE_PACKAGE = "com.udunus.dexplus";
-    public static final String GROK_MODULE_PACKAGE = "com.minsos.externaldex";
     public static final String PREFS_NAME = "internal_dex_prefs";
     public static final String AUTHORITY = "com.udunus.dexplus.provider";
     public static final Uri PREFS_URI = Uri.parse("content://" + AUTHORITY + "/prefs");

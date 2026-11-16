@@ -8,9 +8,6 @@ import com.udunus.dexplus.hooks.SystemUIPowerMenuHook;
 import com.udunus.dexplus.hooks.SystemUIWindowDecorHook;
 import com.udunus.dexplus.util.ModConfig;
 
-import java.lang.reflect.Field;
-import java.util.Collection;
-
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
@@ -32,13 +29,6 @@ public final class MainHook implements IXposedHookLoadPackage {
                         XC_MethodReplacement.returnConstant(true)
                 );
             } catch (Throwable ignored) {}
-            return;
-        }
-
-        // Skip this module when the external DeX module is already loaded in the same process.
-        if (isExternalDexModuleLoaded()) {
-            XposedBridge.log(ModConfig.TAG + ": com.minsos.externaldex is active in "
-                    + lpparam.packageName + "; skipping com.udunus.dexplus hooks.");
             return;
         }
 
@@ -65,27 +55,5 @@ public final class MainHook implements IXposedHookLoadPackage {
                 break;
             }
         }
-    }
-
-    private static boolean isExternalDexModuleLoaded() {
-        try {
-            Field f = XposedBridge.class.getDeclaredField("sLoadedPackageCallbacks");
-            f.setAccessible(true);
-            Object callbacksObj = f.get(null);
-            if (callbacksObj instanceof Collection) {
-                for (Object wrapper : (Collection<?>) callbacksObj) {
-                    if (wrapper == null) continue;
-                    try {
-                        Field instField = wrapper.getClass().getDeclaredField("instance");
-                        instField.setAccessible(true);
-                        Object inst = instField.get(wrapper);
-                        if (inst != null && inst.getClass().getName().startsWith("com.minsos.externaldex.")) {
-                            return true;
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            }
-        } catch (Throwable ignored) {}
-        return false;
     }
 }
