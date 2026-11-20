@@ -59,6 +59,9 @@ import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.Base64;
@@ -667,7 +670,7 @@ public final class LauncherCustomDesktopHook {
         int rows = Math.max(2, availH / Math.max(1, cellSize));
         int cellW = cellSize;
         int cellH = cellSize;
-        int iconSizePx = Math.max(dpToPx(ctx, 16), Math.round(cellSize * 0.54f));
+        int iconSizePx = Math.max(dpToPx(ctx, 16), Math.round(cellSize * 0.52f));
         return new DesktopGridMetrics(cols, rows, padLeft, padTop, padRight, padBottom, cellW, cellH, iconSizePx);
     }
 
@@ -2212,6 +2215,59 @@ public final class LauncherCustomDesktopHook {
             return slot;
         }
 
+        private static boolean textFitsInLines(TextPaint paint, CharSequence text, int maxWidthPx, int maxLines) {
+            if (text == null || text.length() == 0 || maxWidthPx <= 0) return true;
+            try {
+                StaticLayout layout = StaticLayout.Builder
+                        .obtain(text, 0, text.length(), paint, maxWidthPx)
+                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                        .setLineSpacing(0f, 0.92f)
+                        .setIncludePad(false)
+                        .build();
+                return layout.getLineCount() <= maxLines;
+            } catch (Throwable ignored) {
+                return true;
+            }
+        }
+
+        private static String formatDesktopLabel(
+                TextPaint paint,
+                DesktopShortcutItem item,
+                int maxWidthPx,
+                int maxLines) {
+            String label = (item != null && item.label != null) ? item.label : "";
+            if (label.isEmpty() || maxWidthPx <= 0 || textFitsInLines(paint, label, maxWidthPx, maxLines)) {
+                return label;
+            }
+            if (item != null && item.isFileEntry && !item.isDirectory && !item.isCustomShortcut) {
+                int dot = label.lastIndexOf('.');
+                if (dot > 0 && dot < label.length() - 1 && (label.length() - dot) <= 9) {
+                    String stem = label.substring(0, dot);
+                    String suffix = "\u2026" + label.substring(dot);
+                    if (textFitsInLines(paint, suffix, maxWidthPx, maxLines)) {
+                        int lo = 1;
+                        int hi = stem.length();
+                        int best = 0;
+                        while (lo <= hi) {
+                            int mid = (lo + hi) >>> 1;
+                            String candidate = stem.substring(0, mid).trim() + suffix;
+                            if (textFitsInLines(paint, candidate, maxWidthPx, maxLines)) {
+                                best = mid;
+                                lo = mid + 1;
+                            } else {
+                                hi = mid - 1;
+                            }
+                        }
+                        if (best > 0) {
+                            return stem.substring(0, best).trim() + suffix;
+                        }
+                        return suffix;
+                    }
+                }
+            }
+            return label;
+        }
+
         private View createDesktopShortcutCell(
                 final Context context,
                 final DesktopShortcutItem item,
@@ -2224,9 +2280,10 @@ public final class LauncherCustomDesktopHook {
             cell.setOrientation(LinearLayout.VERTICAL);
             cell.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
             int cellDim = Math.max(1, lp.width > 0 ? lp.width : iconSizePx * 2);
-            int pad = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.055f));
-            int padTop = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.065f));
-            cell.setPadding(pad, padTop, pad, pad);
+            int padH = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.04f));
+            int padTop = Math.max(dpToPx(context, 1), Math.round(cellDim * 0.03f));
+            int padBottom = Math.max(dpToPx(context, 1), Math.round(cellDim * 0.02f));
+            cell.setPadding(padH, padTop, padH, padBottom);
             if (Build.VERSION.SDK_INT >= 23) {
                 cell.setContextClickable(true);
             }
@@ -2239,7 +2296,8 @@ public final class LauncherCustomDesktopHook {
             iconView.setImageDrawable(item.icon);
             iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
             LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(iconSizePx, iconSizePx);
-            iconLp.bottomMargin = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.045f));
+            int iconGap = Math.max(dpToPx(context, 1), Math.round(cellDim * 0.02f));
+            iconLp.bottomMargin = iconGap;
             cell.addView(iconView, iconLp);
 
             if (item.isFileEntry && !item.isDirectory && item.backingFile != null) {
@@ -2248,15 +2306,23 @@ public final class LauncherCustomDesktopHook {
 
             TextView labelView = new TextView(context);
             labelView.setId(android.R.id.text1);
-            labelView.setText(item.label);
             labelView.setTextColor(Color.rgb(249, 250, 251));
             float baseIconPx = Math.max(1f, dpToPx(context, 50));
-            float labelSp = Math.max(8.5f, Math.min(14.0f, 12.2f * (iconSizePx / baseIconPx)));
-            labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, labelSp);
+            float desiredSp = Math.max(8.5f, Math.min(13.5f, 11.8f * (iconSizePx / baseIconPx)));
+            float desiredPx = TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_SP, desiredSp, context.getResources().getDisplayMetrics());
+            int availLabelH = Math.max(dpToPx(context, 12), cellDim - padTop - iconSizePx - iconGap - padBottom);
+            float maxTextPx = availLabelH / 2.35f;
+            float finalTextPx = Math.max(dpToPx(context, 7), Math.min(desiredPx, maxTextPx));
+            labelView.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalTextPx);
+            labelView.setIncludeFontPadding(false);
+            labelView.setLineSpacing(0f, 0.92f);
             labelView.setGravity(Gravity.CENTER_HORIZONTAL);
             labelView.setMaxLines(2);
             labelView.setEllipsize(TextUtils.TruncateAt.END);
-            labelView.setShadowLayer(4.5f, 0f, 1.5f, Color.argb(225, 0, 0, 0));
+            int availLabelW = Math.max(dpToPx(context, 18), cellDim - (padH * 2));
+            labelView.setText(formatDesktopLabel(labelView.getPaint(), item, availLabelW, 2));
+            labelView.setShadowLayer(4.0f, 0f, 1.5f, Color.argb(225, 0, 0, 0));
             LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
