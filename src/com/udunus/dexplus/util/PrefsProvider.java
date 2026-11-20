@@ -158,8 +158,12 @@ public class PrefsProvider extends ContentProvider {
             Context ctx = getContext();
             if (ctx != null && extras != null && extras.containsKey("enabled")) {
                 boolean enabled = extras.getBoolean("enabled", true);
+                boolean external = extras.getBoolean("external", false);
+                String key = external
+                        ? ModConfig.KEY_EXTERNAL_DESKTOP_FREE_PLACEMENT
+                        : ModConfig.KEY_DESKTOP_FREE_PLACEMENT;
                 SharedPreferences prefs = ModConfig.getLocalPrefs(ctx);
-                prefs.edit().putBoolean(ModConfig.KEY_DESKTOP_FREE_PLACEMENT, enabled).commit();
+                prefs.edit().putBoolean(key, enabled).commit();
                 ModConfig.broadcastChanges(ctx, prefs);
                 Bundle res = new Bundle();
                 res.putBoolean("enabled", enabled);

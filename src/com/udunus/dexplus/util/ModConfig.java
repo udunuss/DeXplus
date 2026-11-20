@@ -57,11 +57,25 @@ public final class ModConfig {
 
     // Taskbar & Status Panel (Launcher)
     public static final String KEY_DEX_TASKBAR_ENABLED = "dex_taskbar_enabled";
-    public static final String KEY_FIX_EXTERNAL_DEX_DPI = "fix_external_dex_dpi";
+    public static final String KEY_INTERNAL_DEX_DPI_OFFSET = "internal_dex_dpi_offset";
     public static final String KEY_TASKBAR_ICON_SCALE = "taskbar_icon_scale";
     public static final String KEY_TASKBAR_HEIGHT_SCALE = "taskbar_height_scale";
     public static final String KEY_STATUS_PANEL_MODE = "status_panel_mode"; // 0 = DeX Panels + Fallback, 1 = System Shade
     public static final String KEY_SHOW_DEX_FINDER_BTN = "show_dex_finder_btn";
+
+    // External DeX (Connected Monitors)
+    public static final String KEY_EXTERNAL_DEX_DPI_OFFSET = "external_dex_dpi_offset";
+    public static final String KEY_EXTERNAL_TASKBAR_ICON_SCALE = "external_taskbar_icon_scale";
+    public static final String KEY_EXTERNAL_TASKBAR_HEIGHT_SCALE = "external_taskbar_height_scale";
+    public static final String KEY_EXTERNAL_SHOW_FINDER_BTN = "external_show_finder_btn";
+    public static final String KEY_EXTERNAL_DESKTOP_ENABLED = "external_desktop_enabled";
+    public static final String KEY_EXTERNAL_DESKTOP_ICON_SCALE = "external_desktop_icon_scale";
+    public static final String KEY_EXTERNAL_DESKTOP_DOUBLE_CLICK = "external_desktop_double_click";
+    public static final String KEY_EXTERNAL_DESKTOP_FREEFORM_LAUNCH = "external_desktop_freeform_launch";
+    public static final String KEY_EXTERNAL_DESKTOP_FREE_PLACEMENT = "external_desktop_free_placement";
+    public static final String KEY_EXTERNAL_DESKTOP_FILE_BASED = "external_desktop_file_based";
+    public static final String KEY_EXTERNAL_DESKTOP_FOLDER_PATH = "external_desktop_folder_path";
+    public static final String KEY_EXTERNAL_DESKTOP_NEW_FILE_TYPES = "external_desktop_new_file_types";
 
     // Desktop (Launcher)
     public static final String KEY_DESKTOP_ICON_SCALE = "desktop_icon_scale";
@@ -121,11 +135,24 @@ public final class ModConfig {
         defaults.put(KEY_ADVANCED_POWER_MENU, false);
 
         defaults.put(KEY_DEX_TASKBAR_ENABLED, true);
-        defaults.put(KEY_FIX_EXTERNAL_DEX_DPI, true);
+        defaults.put(KEY_INTERNAL_DEX_DPI_OFFSET, 0);
         defaults.put(KEY_TASKBAR_ICON_SCALE, 100);
         defaults.put(KEY_TASKBAR_HEIGHT_SCALE, 100);
         defaults.put(KEY_STATUS_PANEL_MODE, 0);
         defaults.put(KEY_SHOW_DEX_FINDER_BTN, true);
+
+        defaults.put(KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
+        defaults.put(KEY_EXTERNAL_TASKBAR_ICON_SCALE, 100);
+        defaults.put(KEY_EXTERNAL_TASKBAR_HEIGHT_SCALE, 100);
+        defaults.put(KEY_EXTERNAL_SHOW_FINDER_BTN, true);
+        defaults.put(KEY_EXTERNAL_DESKTOP_ENABLED, false);
+        defaults.put(KEY_EXTERNAL_DESKTOP_ICON_SCALE, 100);
+        defaults.put(KEY_EXTERNAL_DESKTOP_DOUBLE_CLICK, true);
+        defaults.put(KEY_EXTERNAL_DESKTOP_FREEFORM_LAUNCH, true);
+        defaults.put(KEY_EXTERNAL_DESKTOP_FREE_PLACEMENT, true);
+        defaults.put(KEY_EXTERNAL_DESKTOP_FILE_BASED, false);
+        defaults.put(KEY_EXTERNAL_DESKTOP_FOLDER_PATH, getDefaultDesktopFolderPath());
+        defaults.put(KEY_EXTERNAL_DESKTOP_NEW_FILE_TYPES, DEFAULT_DESKTOP_NEW_FILE_TYPES);
 
         defaults.put(KEY_DESKTOP_ICON_SCALE, 100);
         defaults.put(KEY_DESKTOP_DOUBLE_CLICK, true);
@@ -591,8 +618,51 @@ public final class ModConfig {
 
     /** Returns the active custom file types configured for the Desktop "New" submenu. */
     public static List<NewFileType> getNewFileTypes(Context context) {
-        return parseNewFileTypes(
-                getString(context, KEY_DESKTOP_NEW_FILE_TYPES, DEFAULT_DESKTOP_NEW_FILE_TYPES));
+        return getNewFileTypes(context, false);
+    }
+
+    /** Returns the active custom file types configured for the Internal or External Desktop "New" submenu. */
+    public static List<NewFileType> getNewFileTypes(Context context, boolean external) {
+        String key = external ? KEY_EXTERNAL_DESKTOP_NEW_FILE_TYPES : KEY_DESKTOP_NEW_FILE_TYPES;
+        return parseNewFileTypes(getString(context, key, DEFAULT_DESKTOP_NEW_FILE_TYPES));
+    }
+
+    /** Normalizes a desktop folder path for reliable equality checks between Internal and External Desktop. */
+    public static String normalizeDesktopFolderPath(String path) {
+        String fallback = getDefaultDesktopFolderPath();
+        String p = (path == null || path.trim().isEmpty()) ? fallback : path.trim();
+        try {
+            p = new File(p).getCanonicalPath();
+        } catch (Throwable ignored) {
+            while (p.length() > 1 && p.endsWith("/")) {
+                p = p.substring(0, p.length() - 1);
+            }
+        }
+        return p;
+    }
+
+    /** Returns true when both Internal and External Desktops are active, file-based, and share the exact same folder. */
+    public static boolean isSharedFileBasedDesktopFolder(Context context) {
+        if (context == null) return false;
+        if (!getBoolean(context, KEY_EXTERNAL_DESKTOP_ENABLED, false)) return false;
+        if (!getBoolean(context, KEY_DESKTOP_FILE_BASED, false)) return false;
+        if (!getBoolean(context, KEY_EXTERNAL_DESKTOP_FILE_BASED, false)) return false;
+        String defPath = getDefaultDesktopFolderPath();
+        String intPath = normalizeDesktopFolderPath(getString(context, KEY_DESKTOP_FOLDER_PATH, defPath));
+        String extPath = normalizeDesktopFolderPath(getString(context, KEY_EXTERNAL_DESKTOP_FOLDER_PATH, defPath));
+        return intPath.equals(extPath);
+    }
+
+    /** Computes the natural horizontal column count for a desktop display given its width, density, and icon scale percent. */
+    public static int computeDesktopNaturalCols(int totalW, float density, int scalePercent) {
+        float d = density > 0f ? density : 1.0f;
+        int padLeft = Math.round(14f * d);
+        int padRight = Math.round(14f * d);
+        int availW = Math.max(Math.round(200f * d), totalW - padLeft - padRight);
+        int clampedScale = Math.max(50, Math.min(150, scalePercent));
+        float scaleFactor = clampedScale / 100.0f;
+        int targetCellSize = Math.max(Math.round(36f * d), Math.round(94f * d * scaleFactor));
+        return Math.max(2, availW / Math.max(1, targetCellSize));
     }
 
     private static boolean restartRegistered;

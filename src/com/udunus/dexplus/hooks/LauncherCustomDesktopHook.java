@@ -40,6 +40,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.hardware.display.DisplayManager;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -65,6 +66,7 @@ import android.util.DisplayMetrics;
 import android.util.LruCache;
 import android.util.TypedValue;
 import android.webkit.MimeTypeMap;
+import android.view.Display;
 import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
 import android.view.Gravity;
@@ -131,6 +133,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class LauncherCustomDesktopHook {
     private static final String TAG_DEX_DESKTOP_VIEW = "dexplus_custom_dex_desktop";
     private static final String DESKTOP_PREFS = "dexplus_desktop_shortcuts";
+    private static final String EXTERNAL_DESKTOP_PREFS = "dexplus_external_desktop_shortcuts";
     private static final String LEGACY_DESKTOP_PREFS = "minsos_dex_desktop_shortcuts";
     private static final String KEY_LEGACY_DESKTOP_PREFS_MIGRATED = "_migrated_legacy_desktop_prefs_v1";
     private static volatile boolean legacyDesktopPrefsMigrated;
@@ -139,6 +142,7 @@ public final class LauncherCustomDesktopHook {
     private static final String CUSTOM_SHORTCUT_PREFIX = "sc:";
     private static final String FILE_ENTRY_PREFIX = "file:";
     private static final String CUSTOM_SHORTCUT_DIR = "dexplus_shortcuts";
+    private static final String EXTERNAL_CUSTOM_SHORTCUT_DIR = "dexplus_external_shortcuts";
     private static final String DEXSC_EXT = ".dexsc";
     private static final String URL_EXT = ".url";
     private static final String DOTFILE_INIT = ".dexplus_initialized";
@@ -147,6 +151,7 @@ public final class LauncherCustomDesktopHook {
     private static final ExecutorService sThumbExecutor = Executors.newFixedThreadPool(2);
     private static final ExecutorService sExternalMoveExecutor = Executors.newSingleThreadExecutor();
     private static final ExecutorService sDesktopLoadExecutor = Executors.newSingleThreadExecutor();
+    private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
     private static final Object FILE_DESKTOP_IO_LOCK = new Object();
     private static final LruCache<String, Bitmap> sThumbCache = new LruCache<>(64);
     private static final LruCache<String, Bitmap> sFileTypeIconCache = new LruCache<>(64);
@@ -156,12 +161,18 @@ public final class LauncherCustomDesktopHook {
 
     private static volatile FrameLayout sActiveDesktopContainer;
     private static volatile ViewGroup sActiveWorkspaceContainer;
+    private static final Map<Integer, ViewGroup> sWorkspaceByDisplay =
+            Collections.synchronizedMap(new HashMap<Integer, ViewGroup>());
+    private static final Map<Integer, FrameLayout> sDesktopByDisplay =
+            Collections.synchronizedMap(new HashMap<Integer, FrameLayout>());
     private static volatile String sLastRedirectedKey;
     private static volatile long sLastRedirectedTime;
     private static volatile Object sLastHoneyDragInfo;
     private static volatile long sLastHoneyDragTime;
     private static volatile int sLastViewWidth;
     private static volatile int sLastViewHeight;
+    private static volatile int sLastExternalViewWidth;
+    private static volatile int sLastExternalViewHeight;
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
@@ -187,6 +198,18 @@ public final class LauncherCustomDesktopHook {
         });
     }
 
+    private static int getViewDisplayId(View v) {
+        if (v != null) {
+            try {
+                Display d = v.getDisplay();
+                if (d != null) return d.getDisplayId();
+            } catch (Throwable ignored) {}
+            Context ctx = v.getContext();
+            if (ctx != null) return LauncherDexTaskbarHook.getContextDisplayId(ctx);
+        }
+        return Display.DEFAULT_DISPLAY;
+    }
+
     private static void hookWorkspaceContainer(final ClassLoader cl) {
         try {
             final Class<?> wsContainerClass = XposedHelpers.findClassIfExists(
@@ -199,9 +222,15 @@ public final class LauncherCustomDesktopHook {
                     try {
                         ViewGroup wsContainer = (ViewGroup) param.thisObject;
                         Context ctx = wsContainer.getContext();
-                        if (ctx == null || !LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) return;
-                        sActiveWorkspaceContainer = wsContainer;
-                        ensureDesktopOverlayAttached(wsContainer);
+                        if (ctx == null) return;
+                        int displayId = getViewDisplayId(wsContainer);
+                        sWorkspaceByDisplay.put(Integer.valueOf(displayId), wsContainer);
+                        if (displayId == Display.DEFAULT_DISPLAY) {
+                            sActiveWorkspaceContainer = wsContainer;
+                        }
+                        if (isDedicatedWorkspaceActive(ctx)) {
+                            ensureDesktopOverlayAttached(wsContainer);
+                        }
                         updateWorkspaceAndDesktopVisibility(wsContainer);
                     } catch (Throwable t) {
                         XposedBridge.log(ModConfig.TAG + ": WorkspaceContainer.onFinishInflate error: " + t);
@@ -215,9 +244,15 @@ public final class LauncherCustomDesktopHook {
                     try {
                         ViewGroup wsContainer = (ViewGroup) param.thisObject;
                         Context ctx = wsContainer.getContext();
-                        if (ctx == null || !LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) return;
-                        sActiveWorkspaceContainer = wsContainer;
-                        ensureDesktopOverlayAttached(wsContainer);
+                        if (ctx == null) return;
+                        int displayId = getViewDisplayId(wsContainer);
+                        sWorkspaceByDisplay.put(Integer.valueOf(displayId), wsContainer);
+                        if (displayId == Display.DEFAULT_DISPLAY) {
+                            sActiveWorkspaceContainer = wsContainer;
+                        }
+                        if (isDedicatedWorkspaceActive(ctx)) {
+                            ensureDesktopOverlayAttached(wsContainer);
+                        }
                         updateWorkspaceAndDesktopVisibility(wsContainer);
                     } catch (Throwable ignored) {}
                 }
@@ -229,7 +264,7 @@ public final class LauncherCustomDesktopHook {
                     try {
                         ViewGroup wsContainer = (ViewGroup) param.thisObject;
                         Context ctx = wsContainer.getContext();
-                        if (ctx == null || !LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) return;
+                        if (ctx == null) return;
                         updateWorkspaceAndDesktopVisibility(wsContainer);
                     } catch (Throwable ignored) {}
                 }
@@ -258,9 +293,10 @@ public final class LauncherCustomDesktopHook {
                         ViewGroup wsContainer = (ViewGroup) param.thisObject;
                         Context ctx = wsContainer.getContext();
                         if (!isDedicatedWorkspaceActive(ctx)) return;
-                        if (sActiveDesktopContainer instanceof ClassicDexDesktopView && sActiveDesktopContainer.isShown()) {
+                        FrameLayout desk = getDesktopForContext(ctx);
+                        if (desk instanceof ClassicDexDesktopView && desk.isShown()) {
                             DragEvent ev = (DragEvent) param.args[1];
-                            boolean handled = ((ClassicDexDesktopView) sActiveDesktopContainer).handleHostDragEvent(wsContainer, ev);
+                            boolean handled = ((ClassicDexDesktopView) desk).handleHostDragEvent(wsContainer, ev);
                             param.setResult(handled);
                         }
                     } catch (Throwable ignored) {}
@@ -303,12 +339,13 @@ public final class LauncherCustomDesktopHook {
                             View homeView = (View) param.thisObject;
                             Context ctx = homeView.getContext();
                             if (!isDedicatedWorkspaceActive(ctx)) return;
-                            if (!(sActiveDesktopContainer instanceof ClassicDexDesktopView) || !sActiveDesktopContainer.isShown()) {
+                            FrameLayout desk = getDesktopForContext(ctx);
+                            if (!(desk instanceof ClassicDexDesktopView) || !desk.isShown()) {
                                 return;
                             }
 
                             MotionEvent ev = (MotionEvent) param.args[0];
-                            ClassicDexDesktopView desktop = (ClassicDexDesktopView) sActiveDesktopContainer;
+                            ClassicDexDesktopView desktop = (ClassicDexDesktopView) desk;
                             float[] local = mapViewCoordinates(homeView, desktop, ev.getX(), ev.getY());
                             if (local != null) {
                                 desktop.recordPointerLocation(local[0], local[1]);
@@ -347,10 +384,13 @@ public final class LauncherCustomDesktopHook {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         try {
-                            Context ctx = resolveWorkspaceContext(null);
+                            View clickedView = (param.args != null && param.args.length > 0 && param.args[0] instanceof View)
+                                    ? (View) param.args[0] : null;
+                            Context ctx = clickedView != null ? clickedView.getContext() : resolveWorkspaceContext(null);
                             if (!isDedicatedWorkspaceActive(ctx)) return;
-                            if (sActiveDesktopContainer instanceof ClassicDexDesktopView && sActiveDesktopContainer.isShown()) {
-                                ((ClassicDexDesktopView) sActiveDesktopContainer).handleSecondaryMenuAtLastTouch();
+                            FrameLayout desk = getDesktopForContext(ctx);
+                            if (desk instanceof ClassicDexDesktopView && desk.isShown()) {
+                                ((ClassicDexDesktopView) desk).handleSecondaryMenuAtLastTouch();
                                 param.setResult(Boolean.TRUE);
                             }
                         } catch (Throwable ignored) {}
@@ -417,6 +457,9 @@ public final class LauncherCustomDesktopHook {
                         try {
                             View clicked = param.args != null && param.args.length > 0 && param.args[0] instanceof View
                                     ? (View) param.args[0] : null;
+                            if (clicked != null && !LauncherDexTaskbarHook.isBuiltInDisplay(clicked.getContext())) {
+                                return;
+                            }
                             Context ctx = resolveWorkspaceContext(clicked != null ? clicked.getContext() : null);
                             if (!isDedicatedWorkspaceActive(ctx)) return;
 
@@ -508,14 +551,24 @@ public final class LauncherCustomDesktopHook {
         return AndroidAppHelper.currentApplication();
     }
 
+    private static FrameLayout getDesktopForContext(Context ctx) {
+        if (ctx != null) {
+            int displayId = LauncherDexTaskbarHook.getContextDisplayId(ctx);
+            FrameLayout mapped = sDesktopByDisplay.get(Integer.valueOf(displayId));
+            if (mapped != null) return mapped;
+            if (!LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) {
+                return null;
+            }
+        }
+        return sActiveDesktopContainer;
+    }
+
     private static boolean isDedicatedWorkspaceActive(Context ctx) {
-        if (ctx == null) return false;
-        ViewGroup ws = sActiveWorkspaceContainer;
-        boolean onBuiltIn = (ws != null && ws.getContext() != null && LauncherDexTaskbarHook.isBuiltInDisplay(ws.getContext()))
-                || LauncherDexTaskbarHook.isBuiltInDisplay(ctx);
-        return onBuiltIn
-                && ModConfig.isModuleEnabled(ctx)
-                && LauncherDexTaskbarHook.isInternalDexActive(ctx, null);
+        if (ctx == null || !ModConfig.isModuleEnabled(ctx)) return false;
+        if (LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) {
+            return LauncherDexTaskbarHook.isInternalDexActive(ctx, null);
+        }
+        return ModConfig.getBoolean(ctx, ModConfig.KEY_EXTERNAL_DESKTOP_ENABLED, false);
     }
 
     private static final class DesktopGridMetrics {
@@ -551,10 +604,47 @@ public final class LauncherCustomDesktopHook {
         }
     }
 
+    private static int computePeerDesktopNaturalCols(Context ctx, boolean peerIsBuiltIn) {
+        try {
+            DisplayManager dmgr = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
+            if (dmgr == null) return -1;
+            Display target = null;
+            if (peerIsBuiltIn) {
+                target = dmgr.getDisplay(Display.DEFAULT_DISPLAY);
+            } else {
+                Display[] displays = dmgr.getDisplays();
+                if (displays != null) {
+                    for (Display d : displays) {
+                        if (d != null && d.getDisplayId() != Display.DEFAULT_DISPLAY) {
+                            target = d;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (target == null) return -1;
+            DisplayMetrics peerDm = new DisplayMetrics();
+            target.getRealMetrics(peerDm);
+            int cachedW = peerIsBuiltIn ? sLastViewWidth : sLastExternalViewWidth;
+            int peerW = cachedW > 0 ? cachedW : peerDm.widthPixels;
+            if (peerW <= 0) return -1;
+            String peerScaleKey = peerIsBuiltIn
+                    ? ModConfig.KEY_DESKTOP_ICON_SCALE
+                    : ModConfig.KEY_EXTERNAL_DESKTOP_ICON_SCALE;
+            int peerScale = Math.max(65, Math.min(150, ModConfig.getInt(ctx, peerScaleKey, 100)));
+            return ModConfig.computeDesktopNaturalCols(peerW, peerDm.density, peerScale);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
     private static DesktopGridMetrics computeDesktopGridMetrics(Context ctx, int widthHint, int heightHint) {
         DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
-        int totalW = widthHint > 0 ? widthHint : (sLastViewWidth > 0 ? sLastViewWidth : dm.widthPixels);
-        int totalH = heightHint > 0 ? heightHint : (sLastViewHeight > 0 ? sLastViewHeight : dm.heightPixels);
+        boolean builtIn = LauncherDexTaskbarHook.isBuiltInDisplay(ctx);
+        int cachedW = builtIn ? sLastViewWidth : sLastExternalViewWidth;
+        int cachedH = builtIn ? sLastViewHeight : sLastExternalViewHeight;
+        int totalW = widthHint > 0 ? widthHint : (cachedW > 0 ? cachedW : dm.widthPixels);
+        int totalH = heightHint > 0 ? heightHint : (cachedH > 0 ? cachedH : dm.heightPixels);
         int padLeft = dpToPx(ctx, 14);
         int padTop = dpToPx(ctx, 14);
         int padRight = dpToPx(ctx, 14);
@@ -563,18 +653,21 @@ public final class LauncherCustomDesktopHook {
 
         int availW = Math.max(dpToPx(ctx, 200), totalW - padLeft - padRight);
         int availH = Math.max(dpToPx(ctx, 180), totalH - padTop - padBottom);
-        int iconScale = Math.max(65, Math.min(150, ModConfig.getInt(ctx, ModConfig.KEY_DESKTOP_ICON_SCALE, 100)));
-        float scaleFactor = iconScale / 100.0f;
-        int desiredIconPx = Math.round(dpToPx(ctx, 50) * scaleFactor);
-        int minCellW = desiredIconPx + Math.round(dpToPx(ctx, 44) * (0.85f + 0.15f * scaleFactor));
-        int minCellH = desiredIconPx + Math.round(dpToPx(ctx, 60) * (0.90f + 0.10f * scaleFactor));
+        String scaleKey = builtIn ? ModConfig.KEY_DESKTOP_ICON_SCALE : ModConfig.KEY_EXTERNAL_DESKTOP_ICON_SCALE;
+        int iconScale = Math.max(50, Math.min(150, ModConfig.getInt(ctx, scaleKey, 100)));
 
-        int cols = Math.max(2, availW / Math.max(1, minCellW));
-        int rows = Math.max(2, availH / Math.max(1, minCellH));
-        int cellW = availW / cols;
-        int cellH = availH / rows;
-        int iconSizePx = Math.max(dpToPx(ctx, 20),
-                Math.min(desiredIconPx, Math.min(cellW - dpToPx(ctx, 16), cellH - dpToPx(ctx, 44))));
+        int cols = ModConfig.computeDesktopNaturalCols(totalW, dm.density, iconScale);
+        if (ModConfig.isSharedFileBasedDesktopFolder(ctx)) {
+            int peerCols = computePeerDesktopNaturalCols(ctx, !builtIn);
+            if (peerCols > cols) {
+                cols = peerCols;
+            }
+        }
+        int cellSize = Math.max(dpToPx(ctx, 32), availW / cols);
+        int rows = Math.max(2, availH / Math.max(1, cellSize));
+        int cellW = cellSize;
+        int cellH = cellSize;
+        int iconSizePx = Math.max(dpToPx(ctx, 16), Math.round(cellSize * 0.54f));
         return new DesktopGridMetrics(cols, rows, padLeft, padTop, padRight, padBottom, cellW, cellH, iconSizePx);
     }
 
@@ -763,7 +856,7 @@ public final class LauncherCustomDesktopHook {
 
     private static void showToastOnMain(final Context ctx, final String msg) {
         if (ctx == null || TextUtils.isEmpty(msg)) return;
-        new Handler(Looper.getMainLooper()).post(new Runnable() {
+        sMainHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -775,30 +868,69 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static void syncDesktopVisibilityOnMainThread() {
-        final ViewGroup wsContainer = sActiveWorkspaceContainer;
-        if (wsContainer == null) return;
-        wsContainer.post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    ensureDesktopOverlayAttached(wsContainer);
-                    updateWorkspaceAndDesktopVisibility(wsContainer);
-                    if (sActiveDesktopContainer instanceof ClassicDexDesktopView) {
-                        ((ClassicDexDesktopView) sActiveDesktopContainer).rebuildGridAsync();
-                    }
-                } catch (Throwable ignored) {}
-            }
-        });
+        List<ViewGroup> containers = new ArrayList<>();
+        synchronized (sWorkspaceByDisplay) {
+            containers.addAll(sWorkspaceByDisplay.values());
+        }
+        if (containers.isEmpty() && sActiveWorkspaceContainer != null) {
+            containers.add(sActiveWorkspaceContainer);
+        }
+        final Set<ClassicDexDesktopView> rebuilt = new HashSet<ClassicDexDesktopView>();
+        for (int i = 0; i < containers.size(); i++) {
+            final ViewGroup wsContainer = containers.get(i);
+            if (wsContainer == null) continue;
+            wsContainer.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Context ctx = wsContainer.getContext();
+                        if (ctx != null && isDedicatedWorkspaceActive(ctx)) {
+                            ensureDesktopOverlayAttached(wsContainer);
+                        }
+                        updateWorkspaceAndDesktopVisibility(wsContainer);
+                        View existing = wsContainer.findViewWithTag(TAG_DEX_DESKTOP_VIEW);
+                        if (existing instanceof ClassicDexDesktopView && existing.getVisibility() == View.VISIBLE) {
+                            ClassicDexDesktopView dv = (ClassicDexDesktopView) existing;
+                            rebuilt.add(dv);
+                            dv.rebuildGridAsync();
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+        }
+        List<FrameLayout> desktopViews = new ArrayList<>();
+        synchronized (sDesktopByDisplay) {
+            desktopViews.addAll(sDesktopByDisplay.values());
+        }
+        for (int i = 0; i < desktopViews.size(); i++) {
+            final FrameLayout fl = desktopViews.get(i);
+            if (!(fl instanceof ClassicDexDesktopView)) continue;
+            fl.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        ClassicDexDesktopView dv = (ClassicDexDesktopView) fl;
+                        if (dv.isAttachedToWindow() && dv.getVisibility() == View.VISIBLE && !rebuilt.contains(dv)) {
+                            dv.rebuildGridAsync();
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+        }
     }
 
     private static void ensureDesktopOverlayAttached(ViewGroup wsContainer) {
         if (wsContainer == null) return;
+        Context ctx = wsContainer.getContext();
+        int displayId = getViewDisplayId(wsContainer);
         View existing = wsContainer.findViewWithTag(TAG_DEX_DESKTOP_VIEW);
         if (existing instanceof ClassicDexDesktopView) {
-            sActiveDesktopContainer = (FrameLayout) existing;
+            sDesktopByDisplay.put(Integer.valueOf(displayId), (FrameLayout) existing);
+            if (displayId == Display.DEFAULT_DISPLAY) {
+                sActiveDesktopContainer = (FrameLayout) existing;
+            }
             return;
         }
-        Context ctx = wsContainer.getContext();
         ClassicDexDesktopView desktopView = new ClassicDexDesktopView(ctx);
         desktopView.setTag(TAG_DEX_DESKTOP_VIEW);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
@@ -806,7 +938,10 @@ public final class LauncherCustomDesktopHook {
                 ViewGroup.LayoutParams.MATCH_PARENT
         );
         wsContainer.addView(desktopView, lp);
-        sActiveDesktopContainer = desktopView;
+        sDesktopByDisplay.put(Integer.valueOf(displayId), desktopView);
+        if (displayId == Display.DEFAULT_DISPLAY) {
+            sActiveDesktopContainer = desktopView;
+        }
     }
 
     private static void updateWorkspaceAndDesktopVisibility(ViewGroup wsContainer) {
@@ -1170,7 +1305,7 @@ public final class LauncherCustomDesktopHook {
                         return true;
                     } else if (action == DragEvent.ACTION_DRAG_LOCATION) {
                         updateDragSessionLocation(event.getLocalState(), event.getX(), event.getY());
-                        if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true)) {
+                        if (isFreePlacementDesktop(context)) {
                             int[] slot = gridCoordsToSlot(event.getX(), event.getY());
                             View slotView = findViewAtSlot(slot[0], slot[1]);
                             if (slotView != null && slotView.getTag() == null) {
@@ -1311,8 +1446,13 @@ public final class LauncherCustomDesktopHook {
         protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w, h, oldw, oldh);
             if (w > 0 && h > 0 && (w != oldw || h != oldh)) {
-                sLastViewWidth = w;
-                sLastViewHeight = h;
+                if (LauncherDexTaskbarHook.isBuiltInDisplay(getContext())) {
+                    sLastViewWidth = w;
+                    sLastViewHeight = h;
+                } else {
+                    sLastExternalViewWidth = w;
+                    sLastExternalViewHeight = h;
+                }
                 rebuildGridAsync();
             }
         }
@@ -1534,7 +1674,7 @@ public final class LauncherCustomDesktopHook {
             if ((keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER)) {
                 List<DesktopShortcutItem> selected = getSelectedItems();
                 if (!selected.isEmpty()) {
-                    launchItems(ctx, selected, ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                    launchItems(ctx, selected, isFreeformLaunchDesktop(ctx));
                     return true;
                 }
             }
@@ -1650,22 +1790,35 @@ public final class LauncherCustomDesktopHook {
                     public void onReceive(Context ctx, Intent intent) {
                         if (intent == null) return;
                         if (ModConfig.ACTION_DESKTOP_COMMAND.equals(intent.getAction())) {
+                            Context viewCtx = getContext();
+                            if (viewCtx == null) viewCtx = ctx;
+                            boolean isExternalView = !LauncherDexTaskbarHook.isBuiltInDisplay(viewCtx);
+                            String scope = intent.getStringExtra("scope");
+                            if ("internal".equals(scope) && isExternalView) {
+                                return;
+                            }
+                            if ("external".equals(scope) && !isExternalView) {
+                                return;
+                            }
                             String cmd = intent.getStringExtra("command");
                             if ("launch_deep_shortcut".equals(cmd)) {
+                                if (isExternalView && !"external".equals(scope)) {
+                                    return;
+                                }
                                 String pkg = intent.getStringExtra("pkg");
                                 String shortcutId = intent.getStringExtra("shortcut_id");
                                 int userId = intent.getIntExtra("userid", -1);
                                 boolean freeform = intent.getBooleanExtra("freeform", true);
-                                ActivityOptions opts = makeLaunchOptions(freeform);
-                                startDeepShortcut(ctx, pkg, shortcutId, userId, opts);
+                                ActivityOptions opts = makeLaunchOptions(viewCtx, freeform);
+                                startDeepShortcut(viewCtx, pkg, shortcutId, userId, opts);
                                 return;
                             }
                             if ("reset_shortcuts".equals(cmd)) {
-                                resetDesktopShortcuts(ctx);
+                                resetDesktopShortcuts(viewCtx);
                                 sDexscCache.evictAll();
                                 sPrefsAppCache.evictAll();
                             } else if ("import_legacy_shortcuts".equals(cmd)) {
-                                importNonFileShortcutsToFileDesktop(ctx);
+                                importNonFileShortcutsToFileDesktop(viewCtx);
                             }
                             rebuildGridAsync();
                         }
@@ -1718,7 +1871,7 @@ public final class LauncherCustomDesktopHook {
             DesktopGridMetrics gm = computeDesktopGridMetrics(ctx, width, height);
             int cols = gm.cols;
             int rows = gm.rows;
-            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
+            boolean freePlacement = isFreePlacementDesktop(ctx);
             List<DesktopShortcutItem> items = loadDesktopShortcuts(ctx, cols * rows);
             if (freePlacement) {
                 Map<String, int[]> placements = resolveGridPlacements(ctx, items, cols, rows);
@@ -1758,17 +1911,21 @@ public final class LauncherCustomDesktopHook {
                 finishInlineRename(false);
             }
             if (getWidth() > 0 && getHeight() > 0) {
-                sLastViewWidth = getWidth();
-                sLastViewHeight = getHeight();
+                if (LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) {
+                    sLastViewWidth = getWidth();
+                    sLastViewHeight = getHeight();
+                } else {
+                    sLastExternalViewWidth = getWidth();
+                    sLastExternalViewHeight = getHeight();
+                }
             }
             final int viewW = getWidth();
             final int viewH = getHeight();
             final int gen = ++mLoadGeneration;
-            final Context loadCtx = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
             sDesktopLoadExecutor.execute(new Runnable() {
                 @Override
                 public void run() {
-                    final GridSnapshot snapshot = buildGridSnapshot(loadCtx, viewW, viewH);
+                    final GridSnapshot snapshot = buildGridSnapshot(ctx, viewW, viewH);
                     mUiHandler.post(new Runnable() {
                         @Override
                         public void run() {
@@ -1792,8 +1949,13 @@ public final class LauncherCustomDesktopHook {
             ++mLoadGeneration;
             syncFileObserver(ctx);
             if (getWidth() > 0 && getHeight() > 0) {
-                sLastViewWidth = getWidth();
-                sLastViewHeight = getHeight();
+                if (LauncherDexTaskbarHook.isBuiltInDisplay(ctx)) {
+                    sLastViewWidth = getWidth();
+                    sLastViewHeight = getHeight();
+                } else {
+                    sLastExternalViewWidth = getWidth();
+                    sLastExternalViewHeight = getHeight();
+                }
             }
             GridSnapshot snapshot = buildGridSnapshot(ctx, getWidth(), getHeight());
             applyGridSnapshot(ctx, snapshot);
@@ -2061,8 +2223,10 @@ public final class LauncherCustomDesktopHook {
             cell.setTag(item);
             cell.setOrientation(LinearLayout.VERTICAL);
             cell.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-            int pad = dpToPx(context, 6);
-            cell.setPadding(pad, dpToPx(context, 8), pad, pad);
+            int cellDim = Math.max(1, lp.width > 0 ? lp.width : iconSizePx * 2);
+            int pad = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.055f));
+            int padTop = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.065f));
+            cell.setPadding(pad, padTop, pad, pad);
             if (Build.VERSION.SDK_INT >= 23) {
                 cell.setContextClickable(true);
             }
@@ -2075,7 +2239,7 @@ public final class LauncherCustomDesktopHook {
             iconView.setImageDrawable(item.icon);
             iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
             LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(iconSizePx, iconSizePx);
-            iconLp.bottomMargin = dpToPx(context, 5);
+            iconLp.bottomMargin = Math.max(dpToPx(context, 2), Math.round(cellDim * 0.045f));
             cell.addView(iconView, iconLp);
 
             if (item.isFileEntry && !item.isDirectory && item.backingFile != null) {
@@ -2086,7 +2250,9 @@ public final class LauncherCustomDesktopHook {
             labelView.setId(android.R.id.text1);
             labelView.setText(item.label);
             labelView.setTextColor(Color.rgb(249, 250, 251));
-            labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.2f);
+            float baseIconPx = Math.max(1f, dpToPx(context, 50));
+            float labelSp = Math.max(8.5f, Math.min(14.0f, 12.2f * (iconSizePx / baseIconPx)));
+            labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, labelSp);
             labelView.setGravity(Gravity.CENTER_HORIZONTAL);
             labelView.setMaxLines(2);
             labelView.setEllipsize(TextUtils.TruncateAt.END);
@@ -2112,20 +2278,20 @@ public final class LauncherCustomDesktopHook {
                         return;
                     }
 
-                    boolean requireDoubleClick = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_DOUBLE_CLICK, true);
+                    boolean requireDoubleClick = isDoubleClickDesktop(context);
                     long now = System.currentTimeMillis();
                     if (requireDoubleClick) {
                         selectSingle(item.storageKey);
                         if (item.storageKey.equals(mLastClickedKey) && (now - mLastClickTime) < 420L) {
                             mLastClickTime = 0L;
-                            launchShortcut(context, item, ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                            launchShortcut(context, item, isFreeformLaunchDesktop(context));
                         } else {
                             mLastClickedKey = item.storageKey;
                             mLastClickTime = now;
                         }
                     } else {
                         selectSingle(item.storageKey);
-                        launchShortcut(context, item, ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                        launchShortcut(context, item, isFreeformLaunchDesktop(context));
                     }
                 }
             });
@@ -2389,7 +2555,7 @@ public final class LauncherCustomDesktopHook {
                     }
                 }
 
-                boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
+                boolean freePlacement = isFreePlacementDesktop(ctx);
                 if (session.draggedKeys.size() > 1) {
                     if (freePlacement) {
                         int[] anchorOld = session.startSlots.get(session.item.storageKey);
@@ -2427,7 +2593,7 @@ public final class LauncherCustomDesktopHook {
             }
 
             // External drop from One UI Home App Drawer / OverlayApps / Finder / OpenFolder
-            boolean freePlacement = ModConfig.getBoolean(ctx, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
+            boolean freePlacement = isFreePlacementDesktop(ctx);
             return handleExternalDragDrop(ctx, event, col, row, targetItem, freePlacement);
         }
 
@@ -3188,8 +3354,7 @@ public final class LauncherCustomDesktopHook {
                 items.add(new DesktopMenuItem("Open selected (" + selected.size() + ")", new Runnable() {
                     @Override
                     public void run() {
-                        launchItems(context, selected,
-                                ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                        launchItems(context, selected, isFreeformLaunchDesktop(context));
                     }
                 }));
                 items.add(new DesktopMenuItem(
@@ -3287,11 +3452,15 @@ public final class LauncherCustomDesktopHook {
 
         private void toggleDesktopFreePlacement(Context context, boolean enabled) {
             try {
+                boolean isExternal = !LauncherDexTaskbarHook.isBuiltInDisplay(context);
                 Bundle extras = new Bundle();
                 extras.putBoolean("enabled", enabled);
+                extras.putBoolean("external", isExternal);
                 context.getContentResolver().call(
                         ModConfig.PREFS_URI, "set_desktop_free_placement", null, extras);
-                ModConfig.putCachedBoolean(ModConfig.KEY_DESKTOP_FREE_PLACEMENT, enabled);
+                ModConfig.putCachedBoolean(
+                        isExternal ? ModConfig.KEY_EXTERNAL_DESKTOP_FREE_PLACEMENT : ModConfig.KEY_DESKTOP_FREE_PLACEMENT,
+                        enabled);
             } catch (Throwable t) {
                 XposedBridge.log(ModConfig.TAG + ": toggle free placement failed: " + t);
             }
@@ -3305,7 +3474,8 @@ public final class LauncherCustomDesktopHook {
             mPendingAddRow = slot[1];
             View anchor = prepareAnchorAt(x, y);
             boolean fileBased = isFileBasedDesktop(context);
-            final boolean freePlacement = ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true);
+            final boolean isExternal = !LauncherDexTaskbarHook.isBuiltInDisplay(context);
+            final boolean freePlacement = isFreePlacementDesktop(context);
             List<DesktopMenuItem> items = new ArrayList<DesktopMenuItem>();
             if (fileBased) {
                 List<DesktopMenuItem> newSubItems = new ArrayList<DesktopMenuItem>();
@@ -3315,7 +3485,7 @@ public final class LauncherCustomDesktopHook {
                         createDesktopFileAndRenameInline(context, true, null);
                     }
                 }));
-                List<ModConfig.NewFileType> newFileTypes = ModConfig.getNewFileTypes(context);
+                List<ModConfig.NewFileType> newFileTypes = ModConfig.getNewFileTypes(context, isExternal);
                 for (int i = 0; i < newFileTypes.size(); i++) {
                     final ModConfig.NewFileType ft = newFileTypes.get(i);
                     newSubItems.add(new DesktopMenuItem(ft.displayTitle(), new Runnable() {
@@ -3331,8 +3501,7 @@ public final class LauncherCustomDesktopHook {
                     public void run() {
                         File dir = getDesktopDirectory(context);
                         if (dir != null) {
-                            openFolderEntry(context, dir,
-                                    ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH, true));
+                            openFolderEntry(context, dir, isFreeformLaunchDesktop(context));
                         }
                     }
                 }));
@@ -3682,7 +3851,7 @@ public final class LauncherCustomDesktopHook {
                 order.add(key);
                 saveShortcutList(context, new LinkedHashSet<>(order));
             }
-            if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true)
+            if (isFreePlacementDesktop(context)
                     && mPendingAddCol >= 0 && mPendingAddRow >= 0) {
                 assignOrSwapSlot(context, key, mPendingAddCol, mPendingAddRow);
                 mPendingAddCol = -1;
@@ -4169,8 +4338,10 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static SharedPreferences getDesktopPrefs(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences(DESKTOP_PREFS, Context.MODE_PRIVATE);
-        if (!legacyDesktopPrefsMigrated) {
+        boolean builtIn = LauncherDexTaskbarHook.isBuiltInDisplay(context);
+        String prefsName = builtIn ? DESKTOP_PREFS : EXTERNAL_DESKTOP_PREFS;
+        SharedPreferences prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE);
+        if (builtIn && !legacyDesktopPrefsMigrated) {
             synchronized (LauncherCustomDesktopHook.class) {
                 if (!legacyDesktopPrefsMigrated) {
                     migrateLegacyDesktopPrefs(context, prefs);
@@ -4218,13 +4389,44 @@ public final class LauncherCustomDesktopHook {
         editor.putBoolean(KEY_LEGACY_DESKTOP_PREFS_MIGRATED, true).commit();
     }
 
+    private static boolean isFreePlacementDesktop(Context context) {
+        if (context == null) return true;
+        String key = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? ModConfig.KEY_DESKTOP_FREE_PLACEMENT
+                : ModConfig.KEY_EXTERNAL_DESKTOP_FREE_PLACEMENT;
+        return ModConfig.getBoolean(context, key, true);
+    }
+
+    private static boolean isFreeformLaunchDesktop(Context context) {
+        if (context == null) return true;
+        String key = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? ModConfig.KEY_DESKTOP_FREEFORM_LAUNCH
+                : ModConfig.KEY_EXTERNAL_DESKTOP_FREEFORM_LAUNCH;
+        return ModConfig.getBoolean(context, key, true);
+    }
+
+    private static boolean isDoubleClickDesktop(Context context) {
+        if (context == null) return true;
+        String key = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? ModConfig.KEY_DESKTOP_DOUBLE_CLICK
+                : ModConfig.KEY_EXTERNAL_DESKTOP_DOUBLE_CLICK;
+        return ModConfig.getBoolean(context, key, true);
+    }
+
     private static boolean isFileBasedDesktop(Context context) {
-        return context != null && ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FILE_BASED, false);
+        if (context == null) return false;
+        String key = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? ModConfig.KEY_DESKTOP_FILE_BASED
+                : ModConfig.KEY_EXTERNAL_DESKTOP_FILE_BASED;
+        return ModConfig.getBoolean(context, key, false);
     }
 
     private static File getDesktopDirectory(Context context) {
         String defaultPath = ModConfig.getDefaultDesktopFolderPath();
-        String path = ModConfig.getString(context, ModConfig.KEY_DESKTOP_FOLDER_PATH, defaultPath);
+        String key = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? ModConfig.KEY_DESKTOP_FOLDER_PATH
+                : ModConfig.KEY_EXTERNAL_DESKTOP_FOLDER_PATH;
+        String path = ModConfig.getString(context, key, defaultPath);
         if (TextUtils.isEmpty(path)) {
             path = defaultPath;
         }
@@ -5167,7 +5369,10 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static File getCustomShortcutDir(Context context) {
-        File dir = new File(context.getFilesDir(), CUSTOM_SHORTCUT_DIR);
+        String dirName = LauncherDexTaskbarHook.isBuiltInDisplay(context)
+                ? CUSTOM_SHORTCUT_DIR
+                : EXTERNAL_CUSTOM_SHORTCUT_DIR;
+        File dir = new File(context.getFilesDir(), dirName);
         if (!dir.exists()) {
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
@@ -5250,7 +5455,7 @@ public final class LauncherCustomDesktopHook {
 
     private static DesktopShortcutItem loadCustomShortcut(Context context, String key) {
         try {
-            File dir = new File(context.getFilesDir(), CUSTOM_SHORTCUT_DIR);
+            File dir = getCustomShortcutDir(context);
             String fileId = sanitizeFileId(key);
             File metaFile = new File(dir, fileId + ".meta");
             if (!metaFile.exists()) return null;
@@ -5299,7 +5504,7 @@ public final class LauncherCustomDesktopHook {
     private static void deleteCustomShortcutFiles(Context context, String key) {
         if (context == null || key == null || !key.startsWith(CUSTOM_SHORTCUT_PREFIX)) return;
         try {
-            File dir = new File(context.getFilesDir(), CUSTOM_SHORTCUT_DIR);
+            File dir = getCustomShortcutDir(context);
             String fileId = sanitizeFileId(key);
             //noinspection ResultOfMethodCallIgnored
             new File(dir, fileId + ".meta").delete();
@@ -5961,9 +6166,55 @@ public final class LauncherCustomDesktopHook {
         return loadPrefsShortcutPositions(context);
     }
 
+    private static void notifyPeerDesktopsForSharedFolder(Context sourceCtx, File dir) {
+        if (sourceCtx == null || dir == null) return;
+        final int sourceDisplayId = LauncherDexTaskbarHook.getContextDisplayId(sourceCtx);
+        final String targetPath = ModConfig.normalizeDesktopFolderPath(dir.getAbsolutePath());
+        final List<ClassicDexDesktopView> peers = new ArrayList<ClassicDexDesktopView>();
+        synchronized (sDesktopByDisplay) {
+            for (Map.Entry<Integer, FrameLayout> entry : sDesktopByDisplay.entrySet()) {
+                Integer dispId = entry.getKey();
+                FrameLayout container = entry.getValue();
+                if (dispId == null || dispId.intValue() == sourceDisplayId || container == null) {
+                    continue;
+                }
+                View existing = container.findViewWithTag(TAG_DEX_DESKTOP_VIEW);
+                if (!(existing instanceof ClassicDexDesktopView)) continue;
+                ClassicDexDesktopView peer = (ClassicDexDesktopView) existing;
+                Context peerCtx = peer.getContext();
+                if (peerCtx == null || !isFileBasedDesktop(peerCtx)) continue;
+                File peerDir = getDesktopDirectory(peerCtx);
+                if (peerDir != null && targetPath.equals(
+                        ModConfig.normalizeDesktopFolderPath(peerDir.getAbsolutePath()))) {
+                    peers.add(peer);
+                }
+            }
+        }
+        if (peers.isEmpty()) return;
+        sMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < peers.size(); i++) {
+                    ClassicDexDesktopView peer = peers.get(i);
+                    if (peer != null && peer.isAttachedToWindow()) {
+                        peer.rebuildGridAsync();
+                    }
+                }
+            }
+        });
+    }
+
     private static void saveShortcutPositions(Context context, Map<String, int[]> positions) {
+        saveShortcutPositions(context, positions, true);
+    }
+
+    private static void saveShortcutPositions(Context context, Map<String, int[]> positions, boolean notifyPeers) {
         if (isFileBasedDesktop(context)) {
-            saveFileShortcutPositions(getDesktopDirectory(context), positions);
+            File dir = getDesktopDirectory(context);
+            saveFileShortcutPositions(dir, positions);
+            if (notifyPeers) {
+                notifyPeerDesktopsForSharedFolder(context, dir);
+            }
             return;
         }
         getDesktopPrefs(context).edit().putString(KEY_SHORTCUT_POSITIONS, serializePositionsText(positions)).commit();
@@ -6002,7 +6253,7 @@ public final class LauncherCustomDesktopHook {
         }
 
         if (dirty || saved.size() != resolved.size()) {
-            saveShortcutPositions(context, resolved);
+            saveShortcutPositions(context, resolved, false);
         }
         return resolved;
     }
@@ -6170,7 +6421,7 @@ public final class LauncherCustomDesktopHook {
                 .remove(KEY_SHORTCUT_POSITIONS)
                 .commit();
         try {
-            File dir = new File(context.getFilesDir(), CUSTOM_SHORTCUT_DIR);
+            File dir = getCustomShortcutDir(context);
             if (dir.exists()) {
                 File[] files = dir.listFiles();
                 if (files != null) {
@@ -6393,7 +6644,7 @@ public final class LauncherCustomDesktopHook {
             set.add(item.storageKey);
         }
         saveShortcutList(context, set);
-        if (ModConfig.getBoolean(context, ModConfig.KEY_DESKTOP_FREE_PLACEMENT, true)) {
+        if (isFreePlacementDesktop(context)) {
             int rows = computeDesktopGridMetrics(context, 0, 0).rows;
             Map<String, int[]> sortedPos = new HashMap<>();
             for (int i = 0; i < current.size(); i++) {
@@ -6415,7 +6666,9 @@ public final class LauncherCustomDesktopHook {
 
     private static void saveShortcutList(Context context, Set<String> keys) {
         if (isFileBasedDesktop(context)) {
-            writeLinesFile(new File(getDesktopDirectory(context), DOTFILE_ORDER), keys);
+            File dir = getDesktopDirectory(context);
+            writeLinesFile(new File(dir, DOTFILE_ORDER), keys);
+            notifyPeerDesktopsForSharedFolder(context, dir);
             return;
         }
         savePrefsShortcutList(context, keys);
@@ -6432,12 +6685,7 @@ public final class LauncherCustomDesktopHook {
             return;
         }
         try {
-            ActivityOptions opts = ActivityOptions.makeBasic();
-            if (freeform) {
-                try {
-                    XposedHelpers.callMethod(opts, "setLaunchWindowingMode", 5); // WINDOWING_MODE_FREEFORM = 5
-                } catch (Throwable ignored) {}
-            }
+            ActivityOptions opts = makeLaunchOptions(context, freeform);
 
             if (item.isCustomShortcut && item.customIntent != null) {
                 Intent scIntent = item.customIntent;
@@ -6502,11 +6750,23 @@ public final class LauncherCustomDesktopHook {
     }
 
     private static ActivityOptions makeLaunchOptions(boolean freeform) {
+        return makeLaunchOptions(null, freeform);
+    }
+
+    private static ActivityOptions makeLaunchOptions(Context ctx, boolean freeform) {
         ActivityOptions opts = ActivityOptions.makeBasic();
         if (freeform) {
             try {
                 XposedHelpers.callMethod(opts, "setLaunchWindowingMode", 5);
             } catch (Throwable ignored) {}
+        }
+        if (ctx != null) {
+            int displayId = LauncherDexTaskbarHook.getContextDisplayId(ctx);
+            if (displayId > 0) {
+                try {
+                    XposedHelpers.callMethod(opts, "setLaunchDisplayId", displayId);
+                } catch (Throwable ignored) {}
+            }
         }
         return opts;
     }
@@ -6519,7 +6779,7 @@ public final class LauncherCustomDesktopHook {
         } else if (absPath.startsWith("/sdcard/")) {
             absPath = "/storage/emulated/0/" + absPath.substring("/sdcard/".length());
         }
-        ActivityOptions opts = makeLaunchOptions(freeform);
+        ActivityOptions opts = makeLaunchOptions(context, freeform);
 
         try {
             Intent myFiles = new Intent("samsung.myfiles.intent.action.LAUNCH_MY_FILES");
@@ -6632,7 +6892,7 @@ public final class LauncherCustomDesktopHook {
                                 Intent view = new Intent(Intent.ACTION_VIEW);
                                 view.setDataAndType(contentUri, mimeType);
                                 view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                                context.startActivity(view, makeLaunchOptions(freeform).toBundle());
+                                context.startActivity(view, makeLaunchOptions(context, freeform).toBundle());
                                 return;
                             }
                         } catch (Throwable t) {
@@ -6684,7 +6944,7 @@ public final class LauncherCustomDesktopHook {
                                         ModConfig.MODULE_PACKAGE, "com.udunus.dexplus.ui.ApkInstallActivity"));
                                 bridge.putExtra("staged_name", stagedName);
                                 bridge.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                                context.startActivity(bridge, makeLaunchOptions(freeform).toBundle());
+                                context.startActivity(bridge, makeLaunchOptions(context, freeform).toBundle());
                                 return;
                             } catch (Throwable t) {
                                 XposedBridge.log(ModConfig.TAG + ": ApkInstallActivity launch error: " + t);

@@ -18,6 +18,7 @@ import android.view.Display;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
@@ -101,7 +102,11 @@ public final class LauncherDexTaskbarHook {
     private static final ThreadLocal<Boolean> BYPASS = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> IN_RETRY = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> DEX_UI = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<Boolean> DEX_UI_BUILTIN = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> IN_TILE_UPDATE = new ThreadLocal<Boolean>();
+    private static volatile boolean lastStatusClickBuiltIn = true;
+    private static volatile long lastStatusClickMs;
+    private static volatile Method motionEventGetDisplayIdMethod;
 
     private static final XC_MethodHook DEX_SPACE = new XC_MethodHook() {
         @Override
@@ -162,20 +167,38 @@ public final class LauncherDexTaskbarHook {
     private static volatile int heightScalePercent = 100;
     private static volatile float scaleFactor = 1f;
     private static volatile float heightScaleFactor = 1f;
+    private static volatile int externalScalePercent = SCALE_DEFAULT;
+    private static volatile int externalHeightScalePercent = 100;
+    private static volatile float externalScaleFactor = 1f;
+    private static volatile float externalHeightScaleFactor = 1f;
     private static volatile Method contextGetDisplayMethod;
+    private static volatile Method contextGetWindowTypeMethod;
+    private static volatile Field windowManagerImplContextField;
     private static volatile Method displayGetTypeMethod;
     private static volatile Method displayManagerGetDisplayMethod;
     private static final ConcurrentHashMap<Integer, Boolean> DIMEN_NON_DEX_CACHE =
             new ConcurrentHashMap<Integer, Boolean>();
     private static volatile boolean modsEnabled = true;
     private static volatile boolean taskbarEnabled = true;
-    private static volatile boolean fixExternalDpi;
     private static volatile boolean hideStatusBar = true;
     private static volatile boolean showFinderBtn = true;
+    private static volatile boolean externalShowFinderBtn = true;
+    private static volatile int externalDpiOffset = 0;
+    private static volatile boolean externalDpiInitialized = false;
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static final Runnable EXTERNAL_DPI_RESTART_RUNNABLE = new Runnable() {
+        @Override
+        public void run() {
+            XposedBridge.log(TAG + ": restarting One UI Home after external display DPI change");
+            Process.killProcess(Process.myPid());
+            System.exit(0);
+        }
+    };
     private static volatile int statusPanelMode = 0;
     private static volatile Object homeUiComponent;
     private static volatile int cachedTaskBarHeightResId = -1;
     private static volatile WeakReference<View> finderButtonRef;
+    private static volatile WeakReference<View> externalFinderButtonRef;
     private static String appliedOptions;
     private static long startedAt;
     private static int applied = UNSET;
@@ -254,10 +277,30 @@ public final class LauncherDexTaskbarHook {
                 }
             }
         } catch (Throwable ignored) {}
-        if (taskbarModsOn()) {
-            return Math.max(1, Math.round(basePx * heightScaleFactor));
+        if (isBuiltInDisplay(context)) {
+            if (taskbarModsOn()) {
+                return Math.max(1, Math.round(basePx * heightScaleFactor));
+            }
+        } else if (modsEnabled && externalHeightScalePercent != 100) {
+            return Math.max(1, Math.round(basePx * externalHeightScaleFactor));
         }
         return basePx;
+    }
+
+    public static int getContextDisplayId(Context ctx) {
+        if (ctx == null) return Display.DEFAULT_DISPLAY;
+        try {
+            Method m = contextGetDisplayMethod;
+            if (m == null) {
+                m = Context.class.getMethod("getDisplay");
+                contextGetDisplayMethod = m;
+            }
+            Object d = m.invoke(ctx);
+            if (d instanceof Display) {
+                return ((Display) d).getDisplayId();
+            }
+        } catch (Throwable ignored) {}
+        return Display.DEFAULT_DISPLAY;
     }
 
     private static int getTaskBarHeightDexId(Context context) {
@@ -290,6 +333,30 @@ public final class LauncherDexTaskbarHook {
             Object d = m.invoke(ctx);
             if (d instanceof Display) {
                 return isBuiltInDisplayObject(d);
+            }
+        } catch (Throwable ignored) {}
+        return true;
+    }
+
+    private static boolean isBuiltInView(View view) {
+        if (view == null) {
+            return false;
+        }
+        Display d = view.getDisplay();
+        if (d != null) {
+            return isBuiltInDisplayObject(d);
+        }
+        return isBuiltInDisplay(view.getContext());
+    }
+
+    private static boolean isBuiltInBinding(Object binding) {
+        if (binding == null) {
+            return true;
+        }
+        try {
+            Object root = binding.getClass().getMethod("getRoot").invoke(binding);
+            if (root instanceof View) {
+                return isBuiltInView((View) root);
             }
         } catch (Throwable ignored) {}
         return true;
@@ -751,7 +818,7 @@ public final class LauncherDexTaskbarHook {
     private static final XC_MethodHook DENSITY_DIMENSION = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            if (!taskbarModsOn() || !(param.getResult() instanceof Integer)) {
+            if (!modsEnabled || !(param.getResult() instanceof Integer)) {
                 return;
             }
             int dp = ((Integer) param.getResult()).intValue();
@@ -759,33 +826,46 @@ public final class LauncherDexTaskbarHook {
                 return;
             }
             Context ctx = (Context) param.args[0];
-            if (!isBuiltInDisplay(ctx) && !fixExternalDpi) {
-                return;
-            }
+            boolean builtIn = isBuiltInDisplay(ctx);
             int resId = (param.args.length > 1 && param.args[1] instanceof Integer)
                     ? ((Integer) param.args[1]).intValue()
                     : 0;
+            boolean isBarHeight = (resId != 0 && resId == getTaskBarHeightDexId(ctx));
+            if (builtIn) {
+                if (!taskbarModsOn()) {
+                    return;
+                }
+            } else {
+                float extScale = isBarHeight ? externalHeightScaleFactor : externalScaleFactor;
+                if (Math.abs(extScale - 1f) < 0.005f) {
+                    return;
+                }
+            }
             if (DEPTH.get()[0] <= 0 && !Boolean.TRUE.equals(DEX_UI.get())) {
                 if (isKnownNonDexDimen(ctx, resId) || !calledFromDexUi()) {
                     return;
                 }
             }
-            float density = contextDensity(ctx);
-            if (density < 0.5f) {
-                return;
+            int px;
+            if (builtIn) {
+                float density = contextDensity(ctx);
+                if (density < 0.5f) {
+                    return;
+                }
+                float effectiveScale = isBarHeight ? heightScaleFactor : scaleFactor;
+                px = Math.round(dp * density * effectiveScale);
+            } else {
+                float effectiveScale = isBarHeight ? externalHeightScaleFactor : externalScaleFactor;
+                px = Math.max(1, Math.round(dp * effectiveScale));
             }
-            float effectiveScale = (resId != 0 && resId == getTaskBarHeightDexId(ctx))
-                    ? heightScaleFactor
-                    : scaleFactor;
-            int px = Math.round(dp * density * effectiveScale);
             if (px == dp) {
                 return;
             }
             param.setResult(Integer.valueOf(px));
-            if (!loggedDensity) {
+            if (!loggedDensity && builtIn) {
                 loggedDensity = true;
                 XposedBridge.log(TAG + ": dex size " + dp + "dp -> " + px
-                        + "px at device density " + density + " scale " + scalePercent + "%");
+                        + "px at device density " + contextDensity(ctx) + " scale " + scalePercent + "%");
             }
         }
     };
@@ -858,48 +938,66 @@ public final class LauncherDexTaskbarHook {
         ModConfig.ensureInitialized(context);
         int scale = clampScale(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_ICON_SCALE, SCALE_DEFAULT));
         int heightScale = clamp(ModConfig.getInt(context, ModConfig.KEY_TASKBAR_HEIGHT_SCALE, 100), 65, 135);
+        int extScale = clampScale(ModConfig.getInt(context, ModConfig.KEY_EXTERNAL_TASKBAR_ICON_SCALE, SCALE_DEFAULT));
+        int extHeightScale = clamp(ModConfig.getInt(context, ModConfig.KEY_EXTERNAL_TASKBAR_HEIGHT_SCALE, 100), 65, 135);
         boolean enabled = ModConfig.isModuleEnabled(context);
         boolean taskbar = ModConfig.getBoolean(context, ModConfig.KEY_DEX_TASKBAR_ENABLED, true);
-        boolean extDpi = ModConfig.getBoolean(context, ModConfig.KEY_FIX_EXTERNAL_DEX_DPI, false);
         boolean forceDex = ModConfig.getBoolean(context, ModConfig.KEY_FORCE_INTERNAL_DEX, false);
         boolean status = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_STATUS_BAR, true);
         boolean finder = ModConfig.getBoolean(context, ModConfig.KEY_SHOW_DEX_FINDER_BTN, true);
+        boolean extFinder = ModConfig.getBoolean(context, ModConfig.KEY_EXTERNAL_SHOW_FINDER_BTN, true);
+        int extDpi = ModConfig.getInt(context, ModConfig.KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
         int panelMode = ModConfig.getInt(context, ModConfig.KEY_STATUS_PANEL_MODE, 0);
 
         String signature = scale + "/" + heightScale + "/" + (enabled ? 1 : 0)
-                + "/" + (taskbar ? 1 : 0) + "/" + (extDpi ? 1 : 0) + "/" + (forceDex ? 1 : 0);
+                + "/" + (taskbar ? 1 : 0) + "/" + (forceDex ? 1 : 0)
+                + "/" + extScale + "x" + extHeightScale;
         boolean changed;
+        boolean extDpiChanged;
         synchronized (LauncherDexTaskbarHook.class) {
             scalePercent = scale;
             heightScalePercent = heightScale;
             scaleFactor = scale / 100f;
             heightScaleFactor = heightScale / 100f;
+            externalScalePercent = extScale;
+            externalHeightScalePercent = extHeightScale;
+            externalScaleFactor = extScale / 100f;
+            externalHeightScaleFactor = extHeightScale / 100f;
             modsEnabled = enabled;
             taskbarEnabled = taskbar;
-            fixExternalDpi = extDpi;
             forceInternalDex = forceDex;
             hideStatusBar = status;
             showFinderBtn = finder;
+            externalShowFinderBtn = extFinder;
             statusPanelMode = panelMode;
             settingsLoaded = true;
             changed = appliedOptions != null && !appliedOptions.equals(signature);
             appliedOptions = signature;
+            extDpiChanged = externalDpiInitialized && extDpi != externalDpiOffset;
+            externalDpiOffset = extDpi;
+            externalDpiInitialized = true;
         }
         XposedBridge.log(TAG + ": settings " + signature);
         applyStatusBar();
         updateFinderButtonVisibility();
         if (changed) {
             restartForScale();
+        } else if (extDpiChanged && hasActiveExternalDisplay()) {
+            MAIN_HANDLER.removeCallbacks(EXTERNAL_DPI_RESTART_RUNNABLE);
+            MAIN_HANDLER.postDelayed(EXTERNAL_DPI_RESTART_RUNNABLE, 550L);
         }
     }
 
     private static void updateFinderButtonVisibility() {
-        WeakReference<View> ref = finderButtonRef;
+        applyFinderVisibility(finderButtonRef, (!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE);
+        applyFinderVisibility(externalFinderButtonRef, (!modsEnabled || externalShowFinderBtn) ? View.VISIBLE : View.GONE);
+    }
+
+    private static void applyFinderVisibility(WeakReference<View> ref, final int vis) {
         final View finderView = ref == null ? null : ref.get();
         if (finderView == null) {
             return;
         }
-        final int vis = (!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE;
         try {
             finderView.post(new Runnable() {
                 @Override
@@ -1085,6 +1183,12 @@ public final class LauncherDexTaskbarHook {
             if (!modsEnabled || !dexOn()) {
                 return;
             }
+            if (param.args != null && param.args.length > 0 && param.args[0] != null) {
+                int evDisplayId = motionEventDisplayId(param.args[0]);
+                if (evDisplayId > 0 && !isBuiltInDisplayId(evDisplayId)) {
+                    return;
+                }
+            }
             if (((Method) param.method).getReturnType() == boolean.class) {
                 param.setResult(Boolean.FALSE);
             } else {
@@ -1096,6 +1200,20 @@ public final class LauncherDexTaskbarHook {
             }
         }
     };
+
+    private static int motionEventDisplayId(Object event) {
+        try {
+            Method m = motionEventGetDisplayIdMethod;
+            if (m == null) {
+                m = event.getClass().getMethod("getDisplayId");
+                motionEventGetDisplayIdMethod = m;
+            }
+            Object id = m.invoke(event);
+            return id instanceof Integer ? ((Integer) id).intValue() : 0;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
 
     private static void hookSuperKey(ClassLoader loader) {
         try {
@@ -1220,6 +1338,9 @@ public final class LauncherDexTaskbarHook {
             XposedHelpers.findAndHookMethod(statusBindingCls, loader, "executeBindings", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isBuiltInBinding(param.thisObject)) {
+                        return;
+                    }
                     int attached = attachNamedClicks(
                             param.thisObject,
                             new String[] {"c", "e", "h", "i", "j", "m"},
@@ -1239,15 +1360,23 @@ public final class LauncherDexTaskbarHook {
             XposedHelpers.findAndHookMethod(taskbarBindingCls, loader, "executeBindings", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    attachNamedClicks(
-                            param.thisObject,
-                            new String[] {"c", "f"},
-                            new String[] {"v", "w"});
+                    boolean builtIn = isBuiltInBinding(param.thisObject);
+                    if (builtIn) {
+                        attachNamedClicks(
+                                param.thisObject,
+                                new String[] {"c", "f"},
+                                new String[] {"v", "w"});
+                    }
                     try {
                         View fv = findBindingViewByEntry(param.thisObject, "c", "finder");
                         if (fv != null) {
-                            finderButtonRef = new WeakReference<View>(fv);
-                            fv.setVisibility((!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE);
+                            if (isBuiltInView(fv)) {
+                                finderButtonRef = new WeakReference<View>(fv);
+                                fv.setVisibility((!taskbarModsOn() || showFinderBtn) ? View.VISIBLE : View.GONE);
+                            } else {
+                                externalFinderButtonRef = new WeakReference<View>(fv);
+                                fv.setVisibility((!modsEnabled || externalShowFinderBtn) ? View.VISIBLE : View.GONE);
+                            }
                         }
                     } catch (Throwable ignored) {}
                 }
@@ -1337,6 +1466,11 @@ public final class LauncherDexTaskbarHook {
                 XposedBridge.hookMethod(toggleMethod, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
+                        boolean builtInPanel = (SystemClock.uptimeMillis() - lastStatusClickMs < 1500L)
+                                ? lastStatusClickBuiltIn : true;
+                        if (!builtInPanel) {
+                            return;
+                        }
                         if (taskbarModsOn() && statusPanelMode == 1
                                 && param.args != null && param.args.length > 0 && param.args[0] instanceof Enum) {
                             String panelName = ((Enum<?>) param.args[0]).name();
@@ -1348,6 +1482,7 @@ public final class LauncherDexTaskbarHook {
                             }
                         }
                         DEX_UI.set(Boolean.TRUE);
+                        DEX_UI_BUILTIN.set(Boolean.TRUE);
                         fillPanelList(param.thisObject);
                         startPanelServices(param.thisObject);
                     }
@@ -1355,6 +1490,7 @@ public final class LauncherDexTaskbarHook {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         DEX_UI.remove();
+                        DEX_UI_BUILTIN.remove();
                     }
                 });
             }
@@ -1371,7 +1507,13 @@ public final class LauncherDexTaskbarHook {
             if (param.args == null || param.args.length == 0) {
                 return;
             }
-            if (!taskbarModsOn() || !(param.args[0] instanceof Integer)) {
+            boolean clickedBuiltIn = true;
+            if (param.args.length > 1 && param.args[1] instanceof View) {
+                clickedBuiltIn = isBuiltInView((View) param.args[1]);
+            }
+            lastStatusClickBuiltIn = clickedBuiltIn;
+            lastStatusClickMs = SystemClock.uptimeMillis();
+            if (!clickedBuiltIn || !taskbarModsOn() || !(param.args[0] instanceof Integer)) {
                 return;
             }
             // key 1 = Accessibility, key 2 = ScreenCapture, key 3 = Volume,
@@ -1658,7 +1800,7 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         View button = findBindingViewByEntry(binding, "e", "notif");
-        if (!(button instanceof ViewGroup)) {
+        if (!(button instanceof ViewGroup) || !isBuiltInView(button)) {
             return;
         }
         ViewGroup group = (ViewGroup) button;
@@ -1966,7 +2108,7 @@ public final class LauncherDexTaskbarHook {
             return;
         }
         View meter = findBatteryMeterView(binding);
-        if (meter != null) {
+        if (meter != null && isBuiltInView(meter)) {
             scheduleBatterySize(meter, false);
         }
     }
@@ -1986,7 +2128,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static void applyBatterySize(View meter) {
-        if (!taskbarModsOn()) {
+        if (!taskbarModsOn() || !isBuiltInView(meter)) {
             return;
         }
         try {
@@ -2492,10 +2634,14 @@ public final class LauncherDexTaskbarHook {
         try {
             Class<?> impl = Class.forName("android.view.WindowManagerImpl");
             for (Method method : impl.getDeclaredMethods()) {
-                if (!"addView".equals(method.getName()) || Modifier.isAbstract(method.getModifiers())) {
+                if (Modifier.isAbstract(method.getModifiers())) {
                     continue;
                 }
-                XposedBridge.hookMethod(method, ADD_VIEW);
+                if ("addView".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, ADD_VIEW);
+                } else if ("updateViewLayout".equals(method.getName())) {
+                    XposedBridge.hookMethod(method, UPDATE_VIEW_LAYOUT);
+                }
             }
         } catch (Throwable ignored) {}
     }
@@ -2519,6 +2665,18 @@ public final class LauncherDexTaskbarHook {
         protected void beforeHookedMethod(MethodHookParam param) {
             if (!taskbarModsOn() || param.args == null) {
                 return;
+            }
+            if (!Boolean.TRUE.equals(DEX_UI_BUILTIN.get())) {
+                for (int i = 0; i < param.args.length; i++) {
+                    Object arg = param.args[i];
+                    if (arg != null && "android.view.Display".equals(arg.getClass().getName())
+                            && !isBuiltInDisplayObject(arg) && isActiveExternalDisplay(arg)) {
+                        return;
+                    }
+                }
+                if (param.thisObject instanceof Context && !isBuiltInDisplay((Context) param.thisObject)) {
+                    return;
+                }
             }
             for (int i = 0; i < param.args.length; i++) {
                 if (!(param.args[i] instanceof Integer)) {
@@ -2545,7 +2703,7 @@ public final class LauncherDexTaskbarHook {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof View) {
+                            if (param.thisObject instanceof View && isBuiltInView((View) param.thisObject)) {
                                 watchStatusIcons((View) param.thisObject);
                             }
                         }
@@ -2576,7 +2734,7 @@ public final class LauncherDexTaskbarHook {
     }
 
     private static boolean growStatusIcons(View area, int windowHeight) {
-        if (!taskbarModsOn() || !(area instanceof ViewGroup)) {
+        if (!taskbarModsOn() || !(area instanceof ViewGroup) || !isBuiltInView(area)) {
             return false;
         }
         int dex = dexBarPx(area);
@@ -2749,6 +2907,9 @@ public final class LauncherDexTaskbarHook {
             if (isBuiltInDisplayObject(param.args[0]) || displayIdOf(param.args[0]) < 0) {
                 return;
             }
+            if (!Boolean.TRUE.equals(DEX_UI_BUILTIN.get()) && isActiveExternalDisplay(param.args[0])) {
+                return;
+            }
             int id = displayIdOf(param.args[0]);
             Object replacement = builtInDisplayObject();
             if (replacement == null) {
@@ -2772,15 +2933,146 @@ public final class LauncherDexTaskbarHook {
             if (isBuiltInDisplayId(id)) {
                 return;
             }
+            if (!Boolean.TRUE.equals(DEX_UI_BUILTIN.get()) && isActiveExternalDisplayId(id)) {
+                return;
+            }
             param.args[0] = Integer.valueOf(0);
         }
     };
+
+    private static Context extractWindowManagerContext(Object wmObj) {
+        if (wmObj == null) return null;
+        try {
+            Field f = windowManagerImplContextField;
+            if (f != null && f.getDeclaringClass().isInstance(wmObj)) {
+                Object val = f.get(wmObj);
+                return (val instanceof Context) ? (Context) val : null;
+            }
+            Class<?> cls = wmObj.getClass();
+            while (cls != null && cls != Object.class) {
+                try {
+                    f = cls.getDeclaredField("mContext");
+                    f.setAccessible(true);
+                    windowManagerImplContextField = f;
+                    Object val = f.get(wmObj);
+                    return (val instanceof Context) ? (Context) val : null;
+                } catch (NoSuchFieldException ignored) {
+                    cls = cls.getSuperclass();
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static int getWindowContextType(Context ctx) {
+        if (ctx == null) return -1;
+        try {
+            Method m = contextGetWindowTypeMethod;
+            if (m == null) {
+                m = Context.class.getMethod("getWindowType");
+                contextGetWindowTypeMethod = m;
+            }
+            Object res = m.invoke(ctx);
+            if (res instanceof Integer) {
+                return ((Integer) res).intValue();
+            }
+        } catch (Throwable ignored) {}
+        return -1;
+    }
+
+    private static boolean isPanelWindowContext(Context ctx) {
+        return getWindowContextType(ctx) == PANEL_WINDOW_TYPE;
+    }
+
+    private static void alignLayoutParamsTypeWithContext(Context wmCtx, Object params) {
+        if (wmCtx == null || !(params instanceof WindowManager.LayoutParams)) return;
+        int ctxType = getWindowContextType(wmCtx);
+        if (ctxType != PANEL_WINDOW_TYPE && ctxType != OVERLAY_WINDOW_TYPE) {
+            return;
+        }
+        WindowManager.LayoutParams lp = (WindowManager.LayoutParams) params;
+        if ((lp.type == PANEL_WINDOW_TYPE || lp.type == OVERLAY_WINDOW_TYPE) && lp.type != ctxType) {
+            lp.type = ctxType;
+        }
+    }
+
+    private static final XC_MethodHook UPDATE_VIEW_LAYOUT = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (param.args == null || param.args.length < 2) {
+                return;
+            }
+            // If the view was already added with a specific window type, never let relayout change it.
+            if (param.args[0] instanceof View) {
+                ViewGroup.LayoutParams existing = ((View) param.args[0]).getLayoutParams();
+                if (existing instanceof WindowManager.LayoutParams
+                        && param.args[1] instanceof WindowManager.LayoutParams) {
+                    int existingType = ((WindowManager.LayoutParams) existing).type;
+                    WindowManager.LayoutParams next = (WindowManager.LayoutParams) param.args[1];
+                    if ((existingType == PANEL_WINDOW_TYPE || existingType == OVERLAY_WINDOW_TYPE)
+                            && (next.type == PANEL_WINDOW_TYPE || next.type == OVERLAY_WINDOW_TYPE)
+                            && next.type != existingType) {
+                        next.type = existingType;
+                        return;
+                    }
+                }
+            }
+            Context wmCtx = extractWindowManagerContext(param.thisObject);
+            if (wmCtx != null) {
+                alignLayoutParamsTypeWithContext(wmCtx, param.args[1]);
+            }
+        }
+    };
+
+    private static boolean hasActiveExternalDisplay() {
+        Context context = appContext;
+        if (context == null) return false;
+        try {
+            Object manager = context.getSystemService("display");
+            if (manager == null) return false;
+            Object displays = manager.getClass().getMethod("getDisplays").invoke(manager);
+            if (displays instanceof Object[]) {
+                for (Object d : (Object[]) displays) {
+                    if (isActiveExternalDisplay(d)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
 
     private static final XC_MethodHook ADD_VIEW = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
             if (Boolean.TRUE.equals(IN_RETRY.get()) || !taskbarModsOn() || param.args == null) {
                 return;
+            }
+            Context wmCtx = extractWindowManagerContext(param.thisObject);
+            if (wmCtx != null && !isBuiltInDisplay(wmCtx)) {
+                if (param.args.length > 1) {
+                    alignLayoutParamsTypeWithContext(wmCtx, param.args[1]);
+                }
+                return;
+            }
+            for (int i = 0; i < param.args.length; i++) {
+                Object arg = param.args[i];
+                if (arg != null && "android.view.Display".equals(arg.getClass().getName())
+                        && !isBuiltInDisplayObject(arg) && isActiveExternalDisplay(arg)) {
+                    return;
+                }
+            }
+            if (!Boolean.TRUE.equals(DEX_UI_BUILTIN.get())) {
+                if (param.args.length > 0 && param.args[0] instanceof View) {
+                    View v = (View) param.args[0];
+                    if (!isBuiltInView(v)) {
+                        return;
+                    }
+                }
+            }
+            boolean keepPanelType = isPanelWindowContext(wmCtx);
+            if (!keepPanelType && param.args.length > 0 && param.args[0] instanceof View) {
+                keepPanelType = isPanelWindowContext(((View) param.args[0]).getContext());
             }
             for (int i = 0; i < param.args.length; i++) {
                 Object arg = param.args[i];
@@ -2795,7 +3087,9 @@ public final class LauncherDexTaskbarHook {
                         }
                     }
                 }
-                forceOverlayType(arg);
+                if (!keepPanelType) {
+                    forceOverlayType(arg);
+                }
             }
         }
 
@@ -2861,19 +3155,12 @@ public final class LauncherDexTaskbarHook {
     };
 
     private static void forceOverlayType(Object params) {
-        Class<?> type = params.getClass();
-        while (type != null && !"android.view.WindowManager$LayoutParams".equals(type.getName())) {
-            type = type.getSuperclass();
-        }
-        if (type == null) {
-            return;
-        }
-        try {
-            Field field = type.getField("type");
-            if (field.getInt(params) == PANEL_WINDOW_TYPE) {
-                field.setInt(params, OVERLAY_WINDOW_TYPE);
+        if (params instanceof WindowManager.LayoutParams) {
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) params;
+            if (lp.type == PANEL_WINDOW_TYPE) {
+                lp.type = OVERLAY_WINDOW_TYPE;
             }
-        } catch (Throwable ignored) {}
+        }
     }
 
     private static boolean invalidDisplay(Throwable error) {
@@ -2891,6 +3178,47 @@ public final class LauncherDexTaskbarHook {
             }
         }
         return false;
+    }
+
+    private static boolean isActiveExternalDisplay(Object display) {
+        if (!(display instanceof Display)) {
+            return false;
+        }
+        Display d = (Display) display;
+        int id = d.getDisplayId();
+        if (id <= Display.DEFAULT_DISPLAY) {
+            return false;
+        }
+        if (!d.isValid()) {
+            return false;
+        }
+        return isActiveExternalDisplayId(id);
+    }
+
+    private static boolean isActiveExternalDisplayId(int id) {
+        if (id <= Display.DEFAULT_DISPLAY) {
+            return false;
+        }
+        Context context = appContext;
+        if (context == null) {
+            return false;
+        }
+        try {
+            Object manager = context.getSystemService("display");
+            if (manager == null) {
+                return false;
+            }
+            Method m = displayManagerGetDisplayMethod;
+            if (m == null) {
+                m = manager.getClass().getMethod("getDisplay", int.class);
+                displayManagerGetDisplayMethod = m;
+            }
+            Object display = m.invoke(manager, Integer.valueOf(id));
+            return (display instanceof Display) && ((Display) display).isValid()
+                    && !isBuiltInDisplayObject(display);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static int displayIdOf(Object display) {

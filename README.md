@@ -5,10 +5,10 @@
 [![Release](https://img.shields.io/github/v/release/udunuss/dexplus?label=Release)](https://github.com/udunuss/dexplus/releases/latest)
 [![Platform](https://img.shields.io/badge/One%20UI-8.5%20%2F%20Android%2016-1f6feb.svg)](https://github.com/udunuss/dexplus)
 
-> [!CAUTION]
-> Untested with Samsung DeX on external monitors. Using this module may break external DeX functionality.
+> [!NOTE]
+> Supports both **Internal DeX** (built-in display) and **External DeX** (connected monitors & simulated secondary displays) with independent taskbar, desktop, and DPI controls.
 
-**DeX+** is an LSPosed module designed for your device's built-in display. It tries to bring classic DeX features to the newer One UI desktop mode—replacing the internal taskbar with the external taskbar, restoring the classic notification and quick settings panels, providing a Windows-style desktop with optional file-backed folders and shortcuts, and adding extra window controls.
+**DeX+** is an LSPosed module for Samsung One UI desktop mode. It brings classic DeX features to the built-in display while also offering independent External DeX customization—providing desktop taskbars with classic notification and quick settings panels, independent Windows-style / file-backed desktop workspaces for internal and external displays, per-display DPI offsets, and enhanced window controls.
 
 Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
@@ -32,51 +32,69 @@ https://github.com/user-attachments/assets/a4313a31-2bb7-4126-aabb-d0ad80c24a40
 
 ## Options
 
-### General
+The DeX+ app organizes settings into four scope-badged groups: **Overview**, **Shared**, **Internal DeX**, and **External DeX**.
 
-- **Enable DeX+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, and window controls. Disabling it restores window alphas, corner radii, and caption controls cleanly.
+### Overview
+
+- **Enable DeX+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, display DPI offsets, and window controls. Disabling it restores window alphas, corner radii, DPI, and caption controls cleanly.
 - **Keep Desktop Mode Always Active.** Keeps the desktop taskbar and window features on the built-in display even when DeX mode is turned off.
 - **Hide Physical Keyboard Toolbar.** Hides the floating keyboard toolbar when a hardware keyboard is connected.
-- **Restart Home Screen.** Reloads One UI Home.
-- **Restart System UI.** Reloads System UI so title-bar changes start fresh.
-- **Restore Defaults.** Prompts for confirmation and resets all preferences back to their default values across hooked processes.
+- **Advanced Power Menu.** Adds Reboot, Soft Reboot, Recovery, and Bootloader actions to the power menu.
+- **Connected Displays Status.** Live summary of built-in and active external displays.
+- **Restart Home Screen / Restart System UI / Restore Defaults.** Quick maintenance actions (restarts do not require root).
 
-### Taskbar & Panels
+### Shared · Window Controls
 
-- **Enable Desktop Taskbar.** Shows the desktop taskbar with running apps, a notification count, quick settings, calendar, and audio controls. Can be toggled independently without turning off window controls or home-screen options.
-- **Use Standard Notification & Quick Settings Shade.** Taskbar notification and quick settings buttons open the full system shade instead of the compact popups.
-- **Show Search Button on Taskbar.** Shows or hides the Finder search button in the taskbar status area live.
-- **Apply Scaling to External Displays.** Also applies the taskbar icon and density scale on connected external monitors.
-- **Taskbar Icon & Text Scale.** Size of taskbar icons and status indicators. Default 100%. Range 70% to 140% (with a **Reset** button).
-- **Taskbar Height.** Height of the desktop taskbar (scales `task_bar_height_dex` and adjusts desktop bottom clearance). Default 100%. Range 75% to 135% (with a **Reset** button).
-
-
-### Desktop
-
-- **Open Shortcuts in Resizable Windows.** Opens desktop shortcuts in freeform windows. Default on.
-- **Free Grid Placement.** Place and keep shortcuts anywhere on the desktop grid instead of packing them top-left (also toggleable from the desktop right-click menu). Default on.
-- **Double-Click to Open Shortcuts.** The first click selects a shortcut. The second click opens it. Default on.
-- **File-Based Desktop.** Uses a real folder on internal storage where each app/deep shortcut is stored as a `.dexsc` file and any folders, videos, images, APKs, or other files in that folder appear directly on the desktop. Default off.
-- **Desktop Folder Path.** Storage folder used when File-Based Desktop is enabled. Default `/storage/emulated/0/Desktop`.
-- **Desktop Icon Size.** Scales desktop icons and labels and automatically computes the grid columns and rows to fill available screen space. Default 100%. Range 70% to 140% (with a **Reset** button).
-- **Create Classic Icons in Desktop Folder / Reset Desktop Shortcuts.** Creates classic desktop icons for file-based mode on demand, or resets desktop shortcuts back to only the System Settings icon.
-
-### Window Controls
+Applies across all displays:
 
 - **Hide Top Status Bar.** Hides the top status bar in desktop mode so windows can use that space.
-- **Drag Window to Top Edge to Maximize.** Dragging a window to the top edge maximizes it instead of leaving DeX. Maximized windows automatically get square corners (`0` radius).
+- **Drag Window to Top Edge to Maximize.** Dragging a window anywhere along the top edge (left, center, or right, with no center dead zone) maximizes it instead of leaving DeX. Maximized windows automatically get square corners (`0` radius).
 - **Fullscreen inside the window.** A video fills the window it is already in without resizing it. When turned off, system fullscreen stays inside DeX and cleanly restores desktop windows, icons, and wallpaper on exit.
 - **Allow All Apps in Resizable Windows.** Lets every installed app run in a freeform window and be resized.
-- **Always-on-Top Pin Button.** Adds a pin button that keeps a window above the others.
+- **Always-on-Top Pin Button.** Adds a pin button that keeps a window above others, including while dragging unpinned windows. Unpinning an unfocused window tucks it cleanly right behind the active window.
 - **Hide Fullscreen Button on Windowed Apps.** Hides the extra fullscreen button on normal and maximized windows.
 - **Long-Press Maximize for Fullscreen.** Hold Maximize or Restore to enter or leave immersive fullscreen for that window.
 - **Hide App Icon Dropdown Arrow.** Hides the arrow next to the app icon. The icon still opens its menu.
-- **Window corner radius.** Rounds floating window corners, including the thin outline. 0 is square. Range 0 to 48 dp (with a quick **Reset** button to return to the system default).
-- **Enable Enhanced Window Menu.** Adds extra tools to the menu opened from the app icon.
-- **Window Opacity Slider.** Adds a transparency slider from 20% to 100% in that menu.
-- **Center & Keep Awake Buttons.** Adds buttons to center the window and keep the screen awake while it is visible.
-- **Show App Info Shortcut.** Replaces Remove from workspace with a button that opens the app's system info page.
-- **Default Window Opacity.** Starting opacity for windows you have not adjusted from the menu. Default 100%. Range 30% to 100% (with a **Reset** button).
+- **Window corner radius.** Rounds floating window corners, including the thin outline. 0 is square. Range 0 to 48 dp (with **Reset**).
+- **Enable Enhanced Window Menu.** Adds extra tools to the menu opened from the app icon:
+  - **Window Opacity Slider** (20%–100%)
+  - **Center & Keep Awake Buttons**
+  - **Show App Info Shortcut**
+- **Default Window Opacity.** Starting opacity for windows you have not adjusted individually. Default 100%. Range 30% to 100% (with **Reset**).
+
+### Internal DeX
+
+- **Taskbar & Panels:**
+  - **Enable Desktop Taskbar.** Shows the desktop taskbar with running apps, live notification count badge, quick settings, calendar, and audio controls on the built-in display.
+  - **Use Standard Notification & Quick Settings Shade.** Opens the full pull-down system shade instead of compact popups.
+  - **Show Search Button on Taskbar.** Shows or hides the Finder search button in the built-in taskbar status area live.
+  - **Taskbar Icon & Text Scale.** 70%–140% (Default 100%, with **Reset**).
+  - **Taskbar Height.** 75%–135% (Default 100%, with **Reset**).
+- **Desktop:**
+  - **Copy Settings from External Desktop.** Copies workspace toggles, folder path, `"New"` menu file types, and icon size from External Desktop.
+  - **Open Shortcuts in Resizable Windows / Free Grid Placement / Double-Click to Open Shortcuts.** Independent workspace behavior toggles.
+  - **File-Based Desktop & Desktop Folder Path.** Uses a real storage folder (default `/storage/emulated/0/Desktop`) with `.dexsc` shortcuts, folders, APKs, media, and documents.
+  - **Custom `"New"` Menu File Types.** Add, remove, or reset custom file templates shown under Desktop right-click → **New**.
+  - **Desktop Icon Size.** 70%–140% square-cell grid scaling (Default 100%, with **Reset**).
+  - **Create Classic Icons in Desktop Folder / Reset Internal Desktop Shortcuts.**
+- **Display & DPI:**
+  - **Internal DeX DPI Offset.** Signed modifier (`-120` to `+120 dpi`, default `0`) added to or subtracted from the built-in display's original density while Internal DeX is active, affecting apps, windows, and system UI.
+
+### External DeX
+
+Applies strictly to connected monitors and simulated secondary displays without leaking onto the built-in display:
+
+- **External Taskbar:**
+  - **Show Search Button on External Taskbar.** Independent Finder button toggle.
+  - **External Taskbar Icon & Text Scale.** 70%–140% (Default 100%, with **Reset**).
+  - **External Taskbar Height.** 75%–135% (Default 100%, with **Reset**).
+- **External Desktop:**
+  - **Enable Custom Desktop on External Displays.** Runs an independent instance of the DeX+ desktop workspace on external monitors, launching apps directly onto the external display.
+  - **Copy Settings from Internal Desktop.** One-tap profile copy from Internal Desktop.
+  - **Full Independent Settings.** Independent resizable-window launch, free grid placement, double-click, file-based desktop, custom folder path, `"New"` menu file types, icon size, and shortcut management.
+  - **Shared Folder Horizontal Grid Sync.** When both Internal and External Desktops use File-Based mode with the same folder, the narrower desktop automatically adapts its square grid and icon sizing to match the wider desktop's horizontal column count, syncs icon moves instantaneously across displays, and grays out the synced desktop's icon size slider while preserving its saved preference if you later switch folders.
+- **External Display & DPI:**
+  - **External DeX DPI Offset.** Signed modifier (`-160` to `+160 dpi`, default `0`) applied directly to the external display's original density, affecting apps, windows, and UI independently of the built-in display.
 
 Changes apply as soon as you toggle them.
 
@@ -140,9 +158,17 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## Version
 
-`1.2.47-dex` (`versionCode` 10247)
+`1.3.0-dex` (`versionCode` 10300)
 
-### Highlights in `1.2.47-dex`
+### Highlights in `1.3.0-dex`
+
+- **Redesigned DeX+ Settings UI:** Rebuilt with a grouped sidebar navigation rail (**Overview**, **Shared**, **Internal DeX**, **External DeX**), custom vector icons, scope badges, live connected-display status, and dedicated **Display & DPI** sections.
+- **Full External DeX Support & Isolation:** Scoped taskbar, display-context, app-launch, right-click, and Finder/panel hooks so connected monitors and simulated secondary displays work natively without leaking into the built-in display, plus automatic live-wallpaper recovery when disconnecting a secondary display.
+- **Independent Internal & External Desktop Instances:** Both displays now run full independent instances of the DeX+ desktop workspace with their own settings, shortcut stores, `"New"` menu file types, and one-tap **Copy Settings** buttons. When both use File-Based Desktop with the same folder, horizontal grid counts and icon moves sync live across displays and the narrower desktop's icon slider is gracefully locked while preserving its saved preference.
+- **Per-Display Signed DPI Offsets:** Replaced the old DPI override toggle with independent signed DPI offset sliders (`-120..+120` Internal, `-160..+160` External) applied via `WindowManagerService` so apps, windows, and UI scale cleanly on each display.
+- **Square Desktop Grid, Top-Edge Maximize & Pin Polish:** Switched desktop grids to proportional square cells at all icon sizes, eliminated the center-top maximize dead zone, kept pinned windows above elevated dragged windows, and refined unpinning unfocused windows to tuck cleanly behind the active window.
+
+### Highlights in `1.2.47-dex` – `1.2.51-dex`
 
 - **Desktop Inline Rename & Creation Flow:** Replaced the rename dialog with direct inline text editing under desktop icons, fixed the white focus highlight overlay on Enter, and started inline rename with only the filename stem selected when creating new folders or files.
 - **Desktop "New" Submenu & Custom File Types:** Grouped item creation under a **"New"** submenu with a right-aligned chevron arrow and tighter `8dp` menu corners, plus a **"New" Menu File Types** editor in **DeX+ Settings → Desktop** to add, remove, or reset custom file templates.

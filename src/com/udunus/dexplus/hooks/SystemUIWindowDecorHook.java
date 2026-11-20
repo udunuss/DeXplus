@@ -52,7 +52,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -1262,10 +1261,24 @@ public final class SystemUIWindowDecorHook {
                 return;
             }
             try {
-                region.getClass().getMethod("setEmpty").invoke(region);
+                // Samsung's calculateFullscreenRegion(DisplayLayout, Region maximizeRegion, int)
+                // subtracts the center-top fullscreen strip from maximizeRegion. Re-union it into
+                // maximizeRegion before clearing fullscreenRegion so the center top has no dead zone.
+                if (param.args != null && param.args.length >= 2
+                        && param.args[1] instanceof android.graphics.Region
+                        && region instanceof android.graphics.Region) {
+                    ((android.graphics.Region) param.args[1]).op(
+                            (android.graphics.Region) region,
+                            android.graphics.Region.Op.UNION);
+                }
+                if (region instanceof android.graphics.Region) {
+                    ((android.graphics.Region) region).setEmpty();
+                } else {
+                    region.getClass().getMethod("setEmpty").invoke(region);
+                }
                 if (!loggedFreeRegion) {
                     loggedFreeRegion = true;
-                    XposedBridge.log(TAG + ": status strip accepts a floating window");
+                    XposedBridge.log(TAG + ": top edge maximizes across full width");
                 }
             } catch (Throwable ignored) {}
         }
@@ -2618,6 +2631,10 @@ public final class SystemUIWindowDecorHook {
             Integer id = Integer.valueOf(chrome.id);
             if (PINNED_IDS.contains(id)) {
                 param.args[1] = Integer.valueOf(1000000);
+            } else if (param.args[1] instanceof Integer && ((Integer) param.args[1]).intValue() >= 1000000) {
+                // Keep dragged/elevated unpinned tasks strictly below pinned windows (1000000+)
+                // while still staying above all other unpinned tasks.
+                param.args[1] = Integer.valueOf(999999);
             }
         }
     };
@@ -4258,21 +4275,59 @@ public final class SystemUIWindowDecorHook {
         return true;
     }
 
+    private static TaskChrome findFrontActiveChrome(int excludeTaskId, int displayId) {
+        TaskChrome best = null;
+        synchronized (TASK_CHROME) {
+            for (TaskChrome c : TASK_CHROME.values()) {
+                if (c == null || c.id == excludeTaskId || c.info == null) continue;
+                if (PINNED_IDS.contains(Integer.valueOf(c.id))) continue;
+                Object cDisp = field(c.info, "displayId");
+                int cDispId = (cDisp instanceof Integer) ? ((Integer) cDisp).intValue() : 0;
+                if (cDispId != displayId) continue;
+                Object cToken = field(c.info, "token");
+                if (cToken == null) continue;
+                boolean cFocused = Boolean.TRUE.equals(field(c.info, "isFocused"));
+                if (cFocused) {
+                    return c;
+                }
+                if (best == null || c.front > best.front) {
+                    best = c;
+                }
+            }
+        }
+        return best;
+    }
+
     private static void releasePinLayer(Object decor) {
         try {
             Object task = field(decor, "mTaskSurface");
             Object taskInfo = field(decor, "mTaskInfo");
             Object organizer = field(decor, "mTaskOrganizer");
             Object token = taskInfo != null ? field(taskInfo, "token") : null;
+            Integer unpinnedId = taskId(taskInfo);
+            Object dispObj = taskInfo != null ? field(taskInfo, "displayId") : null;
+            int displayId = (dispObj instanceof Integer) ? ((Integer) dispObj).intValue() : 0;
+            boolean isFocused = taskInfo != null && Boolean.TRUE.equals(field(taskInfo, "isFocused"));
+            TaskChrome activeChrome = (!isFocused && unpinnedId != null)
+                    ? findFrontActiveChrome(unpinnedId.intValue(), displayId)
+                    : null;
+            Object activeToken = (activeChrome != null && activeChrome.info != null)
+                    ? field(activeChrome.info, "token")
+                    : null;
 
             if (surfaceValid(task)) {
                 ensureRelativeLayer(task);
                 Object txn = newTransaction(task);
                 if (txn != null && layerMethod != null && ensureApply(txn)) {
-                    // Place just above normal task layers before WM natively reassigns child layers
                     PIN_STAMPING.set(Boolean.TRUE);
                     try {
-                        layerMethod.invoke(txn, task, Integer.valueOf(20000));
+                        if (activeChrome != null && surfaceValid(activeChrome.task) && relativeLayerMethod != null) {
+                            // Visually tuck the unpinned window right behind the active window immediately.
+                            relativeLayerMethod.invoke(txn, task, activeChrome.task, Integer.valueOf(-1));
+                        } else {
+                            // Place just above normal task layers before WM natively reassigns child layers.
+                            layerMethod.invoke(txn, task, Integer.valueOf(20000));
+                        }
                         applyMethod.invoke(txn);
                     } finally {
                         PIN_STAMPING.set(Boolean.FALSE);
@@ -4283,14 +4338,18 @@ public final class SystemUIWindowDecorHook {
             if (organizer != null && token != null) {
                 Class<?> wctClass = Class.forName(
                         "android.window.WindowContainerTransaction", false, decor.getClass().getClassLoader());
-                // Toggle task index in TaskDisplayArea (bottom -> top) so WindowManagerService
-                // marks mLayersChanged=true and natively runs assignChildLayers() for all tasks.
+                // Two separate transactions ensure WindowManagerService commits a real z-order
+                // change and natively runs assignChildLayers() for all tasks on the display.
                 Object wctDown = wctClass.getDeclaredConstructor().newInstance();
                 XposedHelpers.callMethod(wctDown, "reorder", token, false);
                 XposedHelpers.callMethod(organizer, "applyTransaction", wctDown);
 
                 Object wctUp = wctClass.getDeclaredConstructor().newInstance();
                 XposedHelpers.callMethod(wctUp, "reorder", token, true);
+                if (activeToken != null) {
+                    // Keep the active window on top, placing the unpinned window right behind it.
+                    XposedHelpers.callMethod(wctUp, "reorder", activeToken, true);
+                }
                 XposedHelpers.callMethod(organizer, "applyTransaction", wctUp);
             }
 

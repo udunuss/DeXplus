@@ -1,12 +1,17 @@
 package com.udunus.dexplus.hooks;
 
+import android.app.ActivityManager;
+import android.app.WallpaperInfo;
+import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.database.ContentObserver;
 import android.database.Cursor;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
@@ -16,6 +21,8 @@ import android.os.Looper;
 import android.os.PatternMatcher;
 import android.os.Process;
 import android.os.SystemClock;
+import android.provider.Settings;
+import android.view.Display;
 
 import com.udunus.dexplus.util.InputDeviceHelper;
 import com.udunus.dexplus.util.ModConfig;
@@ -27,6 +34,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -56,6 +64,10 @@ public final class FrameworkDexHook {
     private static volatile boolean loggedMouseKeyboard;
     private static volatile boolean loggedDexscIntentRewrite;
     private static volatile boolean powerReceiverRegistered;
+    private static volatile boolean displayControllerRegistered;
+    private static final String EFFECTS_KEY = "externaldex_effects";
+    private static final ConcurrentHashMap<Integer, DisplayDensityBaseline> DISPLAY_BASELINES =
+            new ConcurrentHashMap<Integer, DisplayDensityBaseline>();
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
@@ -555,6 +567,7 @@ public final class FrameworkDexHook {
                     }
                     if (amsCtx != null) {
                         registerPowerActionReceiver(amsCtx, cl);
+                        registerDisplayController(amsCtx, cl);
                     }
                 }
             });
@@ -692,6 +705,221 @@ public final class FrameworkDexHook {
             }
         }
         return true;
+    }
+
+    private static final class DisplayDensityBaseline {
+        final int baseDensity;
+        final boolean wasForced;
+        int lastAppliedDensity;
+
+        DisplayDensityBaseline(int baseDensity, boolean wasForced) {
+            this.baseDensity = baseDensity;
+            this.wasForced = wasForced;
+            this.lastAppliedDensity = 0;
+        }
+    }
+
+    private static void registerDisplayController(final Context ctx, final ClassLoader cl) {
+        synchronized (FrameworkDexHook.class) {
+            if (displayControllerRegistered || ctx == null) {
+                return;
+            }
+            try {
+                ModConfig.ensureInitialized(ctx);
+                final Handler mainHandler = new Handler(Looper.getMainLooper());
+                ModConfig.addChangeListener(new Runnable() {
+                    @Override
+                    public void run() {
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                syncAllDisplayDpis(ctx, cl);
+                            }
+                        });
+                    }
+                });
+                try {
+                    Uri effectsUri = Settings.Global.getUriFor(EFFECTS_KEY);
+                    if (effectsUri != null) {
+                        ctx.getContentResolver().registerContentObserver(
+                                effectsUri, false, new ContentObserver(mainHandler) {
+                                    @Override
+                                    public void onChange(boolean selfChange) {
+                                        syncAllDisplayDpis(ctx, cl);
+                                    }
+                                });
+                    }
+                } catch (Throwable ignored) {}
+
+                DisplayManager dm = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
+                if (dm != null) {
+                    dm.registerDisplayListener(new DisplayManager.DisplayListener() {
+                        @Override
+                        public void onDisplayAdded(final int displayId) {
+                            if (displayId <= Display.DEFAULT_DISPLAY) return;
+                            mainHandler.postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    applyDisplayDpi(ctx, cl, displayId);
+                                }
+                            }, 250L);
+                        }
+
+                        @Override
+                        public void onDisplayRemoved(final int displayId) {
+                            if (displayId <= Display.DEFAULT_DISPLAY) return;
+                            DISPLAY_BASELINES.remove(Integer.valueOf(displayId));
+                            mainHandler.postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    recoverLiveWallpaperAfterDisplayRemoved(ctx, cl);
+                                }
+                            }, 400L);
+                        }
+
+                        @Override
+                        public void onDisplayChanged(int displayId) {}
+                    }, mainHandler);
+                }
+                displayControllerRegistered = true;
+                mainHandler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        syncAllDisplayDpis(ctx, cl);
+                    }
+                }, 1500L);
+                XposedBridge.log(ModConfig.TAG + ": registered per-display DPI & wallpaper recovery controller");
+            } catch (Throwable t) {
+                XposedBridge.log(ModConfig.TAG + ": registerDisplayController error: " + t);
+            }
+        }
+    }
+
+    private static void syncAllDisplayDpis(Context ctx, ClassLoader cl) {
+        if (ctx == null) return;
+        try {
+            DisplayManager dm = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
+            if (dm == null) return;
+            Display[] displays = dm.getDisplays();
+            if (displays == null) return;
+            for (Display d : displays) {
+                if (d != null && d.isValid()) {
+                    applyDisplayDpi(ctx, cl, d.getDisplayId());
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": syncAllDisplayDpis error: " + t);
+        }
+    }
+
+    private static void applyDisplayDpi(Context ctx, ClassLoader cl, int displayId) {
+        if (ctx == null || displayId < Display.DEFAULT_DISPLAY) return;
+        final long token = Binder.clearCallingIdentity();
+        try {
+            boolean enabled = ModConfig.isModuleEnabled(ctx);
+            int effectiveOffset;
+            if (displayId == Display.DEFAULT_DISPLAY) {
+                boolean internalDexOn = false;
+                try {
+                    internalDexOn = Settings.Global.getInt(ctx.getContentResolver(), EFFECTS_KEY, 0) == 1;
+                } catch (Throwable ignored) {}
+                int offset = ModConfig.getInt(ctx, ModConfig.KEY_INTERNAL_DEX_DPI_OFFSET, 0);
+                effectiveOffset = (enabled && internalDexOn) ? offset : 0;
+            } else {
+                int offset = ModConfig.getInt(ctx, ModConfig.KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
+                effectiveOffset = enabled ? offset : 0;
+            }
+
+            DisplayDensityBaseline base = DISPLAY_BASELINES.get(Integer.valueOf(displayId));
+            if (base == null && effectiveOffset == 0) {
+                return;
+            }
+
+            Class<?> wmgClass = Class.forName("android.view.WindowManagerGlobal", false, cl);
+            Object wm = wmgClass.getMethod("getWindowManagerService").invoke(null);
+            if (wm == null) return;
+
+            if (base == null) {
+                int initDpi = 0;
+                int curBaseDpi = 0;
+                try {
+                    Object v = wm.getClass().getMethod("getInitialDisplayDensity", int.class)
+                            .invoke(wm, Integer.valueOf(displayId));
+                    if (v instanceof Integer) initDpi = ((Integer) v).intValue();
+                } catch (Throwable ignored) {}
+                try {
+                    Object v = wm.getClass().getMethod("getBaseDisplayDensity", int.class)
+                            .invoke(wm, Integer.valueOf(displayId));
+                    if (v instanceof Integer) curBaseDpi = ((Integer) v).intValue();
+                } catch (Throwable ignored) {}
+                if (curBaseDpi <= 0) curBaseDpi = initDpi;
+                if (curBaseDpi <= 0) return;
+                base = new DisplayDensityBaseline(curBaseDpi, initDpi > 0 && curBaseDpi != initDpi);
+                DISPLAY_BASELINES.put(Integer.valueOf(displayId), base);
+            }
+
+            if (effectiveOffset == 0) {
+                if (base.lastAppliedDensity != 0) {
+                    if (base.wasForced) {
+                        wm.getClass().getMethod("setForcedDisplayDensityForUser", int.class, int.class, int.class)
+                                .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(base.baseDensity), Integer.valueOf(0));
+                    } else {
+                        wm.getClass().getMethod("clearForcedDisplayDensityForUser", int.class, int.class)
+                                .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(0));
+                    }
+                    XposedBridge.log(ModConfig.TAG + ": display " + displayId + " DPI restored to " + base.baseDensity);
+                    base.lastAppliedDensity = 0;
+                }
+                DISPLAY_BASELINES.remove(Integer.valueOf(displayId));
+                return;
+            }
+
+            int target = Math.max(120, Math.min(640, base.baseDensity + effectiveOffset));
+            if (target != base.lastAppliedDensity) {
+                wm.getClass().getMethod("setForcedDisplayDensityForUser", int.class, int.class, int.class)
+                        .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(target), Integer.valueOf(0));
+                base.lastAppliedDensity = target;
+                XposedBridge.log(ModConfig.TAG + ": display " + displayId + " DPI set to "
+                        + target + " (base=" + base.baseDensity + ", offset=" + effectiveOffset + ")");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": applyDisplayDpi(" + displayId + ") error: " + t);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    /**
+     * Samsung's GraphicalWallpaperService shares one process across displays; tearing down a
+     * secondary display's engine can blank Display 0's wallpaper until reboot. Restarting the
+     * live wallpaper process via killUid lets WallpaperManagerService rebind it cleanly on Display 0.
+     */
+    private static void recoverLiveWallpaperAfterDisplayRemoved(Context ctx, ClassLoader cl) {
+        if (ctx == null || !ModConfig.isModuleEnabled(ctx)) return;
+        final long token = Binder.clearCallingIdentity();
+        try {
+            WallpaperManager wm = WallpaperManager.getInstance(ctx);
+            WallpaperInfo info = wm != null ? wm.getWallpaperInfo() : null;
+            if (info == null) return;
+            String wpPkg = info.getPackageName();
+            if (wpPkg == null || wpPkg.isEmpty()) return;
+            int uid = ctx.getPackageManager().getPackageUid(wpPkg, 0);
+            int appId = uid % 100000;
+            int userId = uid / 100000;
+            Object amService = Class.forName("android.app.ActivityManager", false, cl)
+                    .getMethod("getService").invoke(null);
+            if (amService != null) {
+                amService.getClass().getMethod("killUid", int.class, int.class, String.class)
+                        .invoke(amService, Integer.valueOf(appId), Integer.valueOf(userId),
+                                "dexplus_wallpaper_recover");
+                XposedBridge.log(ModConfig.TAG + ": recovered live wallpaper (" + wpPkg
+                        + ") after secondary display removal");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": recoverLiveWallpaper error: " + t);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
     }
 
     private static final class CachedUriResult {
