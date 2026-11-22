@@ -8,7 +8,7 @@
 > [!NOTE]
 > Supports both **Internal DeX** (built-in display) and **External DeX** (connected monitors & simulated secondary displays) with independent taskbar, desktop, and DPI controls.
 
-**DeX+** is an LSPosed module for Samsung One UI desktop mode. It brings classic DeX features to the built-in display while also offering independent External DeX customization—providing desktop taskbars with classic notification and quick settings panels, independent Windows-style / file-backed desktop workspaces for internal and external displays, per-display DPI offsets, and enhanced window controls.
+**DeX+** is an LSPosed module for Samsung One UI desktop mode. It brings classic DeX features to the built-in display while also offering independent External DeX customization—providing desktop taskbars with classic notification and quick settings panels, independent Windows-style / file-backed desktop workspaces for internal and external displays, per-display runtime DPI multipliers, and enhanced window controls.
 
 Developed against MinsOS 1.2.3 (One UI 8.5) on a Galaxy Tab S7+. Other One UI versions or devices may differ.
 
@@ -36,7 +36,7 @@ The DeX+ app organizes settings into four scope-badged groups: **Overview**, **S
 
 ### Overview
 
-- **Enable DeX+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, display DPI offsets, and window controls. Disabling it restores window alphas, corner radii, DPI, and caption controls cleanly.
+- **Enable DeX+.** Master switch for the desktop taskbar, workspace, status bar, keyboard hook, display DPI multipliers, and window controls. Disabling it restores window alphas, corner radii, DPI, and caption controls cleanly.
 - **Keep Desktop Mode Always Active.** Keeps the desktop taskbar and window features on the built-in display even when DeX mode is turned off.
 - **Hide Physical Keyboard Toolbar.** Hides the floating keyboard toolbar when a hardware keyboard is connected.
 - **Advanced Power Menu.** Adds Reboot, Soft Reboot, Recovery, and Bootloader actions to the power menu.
@@ -78,7 +78,7 @@ Applies across all displays:
   - **Desktop Icon Size.** 70%–140% square-cell grid scaling (Default 100%, with **Reset**).
   - **Create Classic Icons in Desktop Folder / Reset Internal Desktop Shortcuts.**
 - **Display & DPI:**
-  - **Internal DeX DPI Offset.** Signed modifier (`-120` to `+120 dpi`, default `0`) added to or subtracted from the built-in display's original density while Internal DeX is active, affecting apps, windows, and system UI.
+  - **Internal DeX DPI Multiplier.** Runtime density multiplier (`0.50x` to `1.50x`, default `1.00x`) applied dynamically on top of the built-in display's original system density while Internal DeX is active, without mutating Android's stored system DPI.
 
 ### External DeX
 
@@ -94,7 +94,7 @@ Applies strictly to connected monitors and simulated secondary displays without 
   - **Full Independent Settings.** Independent resizable-window launch, free grid placement, double-click, file-based desktop, custom folder path, `"New"` menu file types, icon size, and shortcut management.
   - **Shared Folder Horizontal Grid Sync.** When both Internal and External Desktops use File-Based mode with the same folder, the narrower desktop automatically adapts its square grid and icon sizing to match the wider desktop's horizontal column count, syncs icon moves instantaneously across displays, and grays out the synced desktop's icon size slider while preserving its saved preference if you later switch folders.
 - **External Display & DPI:**
-  - **External DeX DPI Offset.** Signed modifier (`-160` to `+160 dpi`, default `0`) applied directly to the external display's original density, affecting apps, windows, and UI independently of the built-in display.
+  - **External DeX DPI Multiplier.** Runtime density multiplier (`0.50x` to `2.00x`, default `1.00x`) applied dynamically on top of the external display's original system density, affecting apps, windows, and UI independently of the built-in display without mutating stored system DPI.
 
 Changes apply as soon as you toggle them.
 
@@ -158,7 +158,13 @@ On Termux, if `d8` is not installed, set `R8_JAR` to an `r8.jar` path; `build.sh
 
 ## Version
 
-`1.3.0-dex` (`versionCode` 10300)
+`1.3.1-dex` (`versionCode` 10301)
+
+### Highlights in `1.3.1-dex`
+
+- **Non-Compounding Runtime DPI Multipliers:** Replaced the persisted signed DPI offsets with independent runtime DPI multipliers (**Internal DeX** `0.50x`–`1.50x`, **External DeX** `0.50x`–`2.00x`, default `1.00x`) hijacked dynamically in `DisplayContent.updateDisplayAndOrientation` without modifying Android's stored system DPI, preventing DPI compounding across reboots.
+- **Working Per-Window Keep Awake:** Replaced the ineffective `SurfaceControlViewHost` `setKeepScreenOn` call with a lifecycle-managed SystemUI `PowerManager` `SCREEN_BRIGHT_WAKE_LOCK` that stays active while a Keep-Awake window is visible and automatically releases when toggled off, minimized, closed, or disabled.
+- **App Info Menu Icon Aspect Fix:** Replaced the raw bitmap assignment in the window app-icon menu with a `SquareBitmapDrawable` matching sibling icon intrinsic dimensions and clamping draw bounds to a centered 1:1 square so the App info icon no longer stretches vertically.
 
 ### Highlights in `1.3.0-dex`
 

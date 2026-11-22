@@ -57,14 +57,19 @@ public final class ModConfig {
 
     // Taskbar & Status Panel (Launcher)
     public static final String KEY_DEX_TASKBAR_ENABLED = "dex_taskbar_enabled";
-    public static final String KEY_INTERNAL_DEX_DPI_OFFSET = "internal_dex_dpi_offset";
+    public static final String KEY_INTERNAL_DEX_DPI_SCALE = "internal_dex_dpi_scale";
+    public static final int DPI_SCALE_DEFAULT = 100;
+    public static final int INTERNAL_DPI_SCALE_MIN = 50;
+    public static final int INTERNAL_DPI_SCALE_MAX = 150;
     public static final String KEY_TASKBAR_ICON_SCALE = "taskbar_icon_scale";
     public static final String KEY_TASKBAR_HEIGHT_SCALE = "taskbar_height_scale";
     public static final String KEY_STATUS_PANEL_MODE = "status_panel_mode"; // 0 = DeX Panels + Fallback, 1 = System Shade
     public static final String KEY_SHOW_DEX_FINDER_BTN = "show_dex_finder_btn";
 
     // External DeX (Connected Monitors)
-    public static final String KEY_EXTERNAL_DEX_DPI_OFFSET = "external_dex_dpi_offset";
+    public static final String KEY_EXTERNAL_DEX_DPI_SCALE = "external_dex_dpi_scale";
+    public static final int EXTERNAL_DPI_SCALE_MIN = 50;
+    public static final int EXTERNAL_DPI_SCALE_MAX = 200;
     public static final String KEY_EXTERNAL_TASKBAR_ICON_SCALE = "external_taskbar_icon_scale";
     public static final String KEY_EXTERNAL_TASKBAR_HEIGHT_SCALE = "external_taskbar_height_scale";
     public static final String KEY_EXTERNAL_SHOW_FINDER_BTN = "external_show_finder_btn";
@@ -135,13 +140,13 @@ public final class ModConfig {
         defaults.put(KEY_ADVANCED_POWER_MENU, false);
 
         defaults.put(KEY_DEX_TASKBAR_ENABLED, true);
-        defaults.put(KEY_INTERNAL_DEX_DPI_OFFSET, 0);
+        defaults.put(KEY_INTERNAL_DEX_DPI_SCALE, DPI_SCALE_DEFAULT);
         defaults.put(KEY_TASKBAR_ICON_SCALE, 100);
         defaults.put(KEY_TASKBAR_HEIGHT_SCALE, 100);
         defaults.put(KEY_STATUS_PANEL_MODE, 0);
         defaults.put(KEY_SHOW_DEX_FINDER_BTN, true);
 
-        defaults.put(KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
+        defaults.put(KEY_EXTERNAL_DEX_DPI_SCALE, DPI_SCALE_DEFAULT);
         defaults.put(KEY_EXTERNAL_TASKBAR_ICON_SCALE, 100);
         defaults.put(KEY_EXTERNAL_TASKBAR_HEIGHT_SCALE, 100);
         defaults.put(KEY_EXTERNAL_SHOW_FINDER_BTN, true);

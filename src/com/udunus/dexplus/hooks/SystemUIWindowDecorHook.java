@@ -3,12 +3,15 @@ package com.udunus.dexplus.hooks;
 import android.content.ClipDescription;
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.hardware.input.InputManager;
@@ -16,6 +19,7 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PersistableBundle;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
@@ -107,12 +111,16 @@ public final class SystemUIWindowDecorHook {
     private static final String BACK_TAG = "internaldex.back";
     private static final String SLIDER_TAG = "internaldex.opacity";
     private static final String TOOLS_TAG = "internaldex.tools";
+    private static final String KEEP_AWAKE_BTN_TAG = "internaldex.keep_awake_btn";
     private static final float MIN_WINDOW_ALPHA = 0.2f;
 
     private static final WeakHashMap<View, Boolean> HIDDEN_MAXIMIZE = new WeakHashMap<View, Boolean>();
     private static final WeakHashMap<View, Boolean> HIDDEN_FULLSCREEN = new WeakHashMap<View, Boolean>();
     private static final WeakHashMap<View, Boolean> HIDDEN_CHEVRON = new WeakHashMap<View, Boolean>();
     private static final Set<Integer> PINNED_IDS = Collections.synchronizedSet(new HashSet<Integer>());
+    private static final Set<Integer> KEEP_AWAKE_IDS = Collections.synchronizedSet(new HashSet<Integer>());
+    private static final Object WAKE_LOCK_GUARD = new Object();
+    private static PowerManager.WakeLock keepAwakeWakeLock;
     private static final Map<Integer, TaskChrome> TASK_CHROME = Collections.synchronizedMap(new HashMap<Integer, TaskChrome>());
     private static final ConcurrentHashMap<Object, TaskChrome> SURFACE_TO_TASK = new ConcurrentHashMap<Object, TaskChrome>();
     private static final Map<Integer, Float> WINDOW_ALPHA = Collections.synchronizedMap(new HashMap<Integer, Float>());
@@ -246,6 +254,7 @@ public final class SystemUIWindowDecorHook {
                         applyDefaultOpacityToKnown();
                         applyCornerRadiusToKnown();
                         refreshKnownCaptions();
+                        syncKeepAwakeWakeLock(systemUiContext);
                     }
                 };
                 if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -2443,6 +2452,9 @@ public final class SystemUIWindowDecorHook {
                 if ("relayout".equals(method.getName())) {
                     XposedBridge.hookMethod(method, ADD_PIN_BUTTON);
                     hooked++;
+                } else if ("close".equals(method.getName()) && method.getParameterTypes().length == 0) {
+                    XposedBridge.hookMethod(method, DROP_KEEP_AWAKE_ON_CLOSE);
+                    hooked++;
                 }
             }
             Class<?> model = Class.forName(
@@ -2579,6 +2591,22 @@ public final class SystemUIWindowDecorHook {
             if (chrome != null) {
                 chrome.info = param.args[0];
             }
+            if (!KEEP_AWAKE_IDS.isEmpty() && KEEP_AWAKE_IDS.contains(id)) {
+                syncKeepAwakeWakeLock(systemUiContext);
+            }
+        }
+    };
+
+    private static final XC_MethodHook DROP_KEEP_AWAKE_ON_CLOSE = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (KEEP_AWAKE_IDS.isEmpty() || param.thisObject == null) {
+                return;
+            }
+            Integer id = taskId(field(param.thisObject, "mTaskInfo"));
+            if (id != null && KEEP_AWAKE_IDS.remove(id)) {
+                syncKeepAwakeWakeLock(systemUiContext);
+            }
         }
     };
 
@@ -2678,6 +2706,7 @@ public final class SystemUIWindowDecorHook {
             Integer id = taskId(param.args[0]);
             if (id != null) {
                 boolean wasPinned = PINNED_IDS.remove(id);
+                boolean wasKeepAwake = KEEP_AWAKE_IDS.remove(id);
                 TaskChrome removed = TASK_CHROME.remove(id);
                 if (removed != null && removed.task != null) {
                     SURFACE_TO_TASK.remove(removed.task, removed);
@@ -2686,6 +2715,9 @@ public final class SystemUIWindowDecorHook {
                 ALPHA_MANUAL.remove(id);
                 if (wasPinned) {
                     refreshPinnedSurfaces();
+                }
+                if (wasKeepAwake) {
+                    syncKeepAwakeWakeLock(systemUiContext);
                 }
                 if (!PINNED_IDS.isEmpty()) {
                     applyPinOrder(pinOrderCover);
@@ -2711,6 +2743,9 @@ public final class SystemUIWindowDecorHook {
         fitOpenMenu(root);
         rememberChrome(decor);
         applyDefaultOpacity(decor, ctx, on);
+        if (!KEEP_AWAKE_IDS.isEmpty()) {
+            syncKeepAwakeWakeLock(ctx);
+        }
         View minimize = findSysUiView(root, IDX_MINIMIZE_WINDOW);
         if (minimize == null || !(minimize.getParent() instanceof ViewGroup)) {
             if (on) {
@@ -2994,7 +3029,22 @@ public final class SystemUIWindowDecorHook {
         button.setContentDescription("App info");
         Object icon = field(button, "mIconView");
         if (icon instanceof ImageView) {
-            ((ImageView) icon).setImageBitmap(infoBitmap());
+            ImageView iv = (ImageView) icon;
+            Drawable existing = iv.getDrawable();
+            int origW = existing != null ? existing.getIntrinsicWidth() : 0;
+            int origH = existing != null ? existing.getIntrinsicHeight() : 0;
+            int targetSize;
+            if (origW > 0 && origH > 0) {
+                targetSize = Math.min(origW, origH);
+            } else if (origW > 0) {
+                targetSize = origW;
+            } else if (origH > 0) {
+                targetSize = origH;
+            } else {
+                targetSize = px(iv.getContext(), 20);
+            }
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setImageDrawable(new SquareBitmapDrawable(iv.getResources(), infoBitmap(), targetSize));
         }
         button.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -3061,11 +3111,17 @@ public final class SystemUIWindowDecorHook {
     }
 
     private static void ensureExtraTools(final ViewGroup menu, final Object policy) {
-        if (findChildByTag(menu, TOOLS_TAG) != null) {
-            return;
-        }
         final Context context = menu.getContext();
         if (context == null) {
+            return;
+        }
+        final Integer tid = taskId(field(policy, "mTaskInfo"));
+        View existingRow = findChildByTag(menu, TOOLS_TAG);
+        if (existingRow instanceof ViewGroup) {
+            View existingKeep = findChildByTag((ViewGroup) existingRow, KEEP_AWAKE_BTN_TAG);
+            if (existingKeep instanceof Button) {
+                bindKeepAwakeButton((Button) existingKeep, context, tid, policy);
+            }
             return;
         }
         int textColor = menuTextColor(findSysUiView(menu, IDX_REMOVE_FROM_WORKSPACE));
@@ -3084,25 +3140,11 @@ public final class SystemUIWindowDecorHook {
             }
         });
 
-        Integer tid = taskId(field(policy, "mTaskInfo"));
-        final TaskChrome chrome = tid == null ? null : TASK_CHROME.get(tid);
-        final View decorRoot = chrome != null && chrome.host != null
-                ? (View) field(field(chrome.host, "mResult"), "mRootView")
-                : null;
-        boolean initKeep = decorRoot != null && decorRoot.getKeepScreenOn();
+        boolean initKeep = tid != null && KEEP_AWAKE_IDS.contains(tid);
         final Button keepAwakeBtn = createPillToolButton(
                 context, initKeep ? "Keep Awake: ON" : "Keep Awake", textColor, dm);
-        keepAwakeBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (decorRoot != null) {
-                    boolean next = !decorRoot.getKeepScreenOn();
-                    decorRoot.setKeepScreenOn(next);
-                    keepAwakeBtn.setText(next ? "Keep Awake: ON" : "Keep Awake");
-                    Toast.makeText(context, next ? "Keep Screen Awake enabled" : "Keep Screen Awake disabled", Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
+        keepAwakeBtn.setTag(KEEP_AWAKE_BTN_TAG);
+        bindKeepAwakeButton(keepAwakeBtn, context, tid, policy);
 
         LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         lp1.rightMargin = px(context, 6);
@@ -3115,6 +3157,119 @@ public final class SystemUIWindowDecorHook {
         row.setLayoutParams(rowLp);
         int idx = findChildByTag(menu, SLIDER_TAG) != null ? 1 : 0;
         menu.addView(row, idx);
+    }
+
+    private static void bindKeepAwakeButton(
+            final Button keepAwakeBtn, final Context context, final Integer tid, final Object policy) {
+        boolean initKeep = tid != null && KEEP_AWAKE_IDS.contains(tid);
+        keepAwakeBtn.setText(initKeep ? "Keep Awake: ON" : "Keep Awake");
+        keepAwakeBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (tid == null) {
+                    return;
+                }
+                Object latestInfo = field(policy, "mTaskInfo");
+                if (latestInfo != null) {
+                    TaskChrome chrome = TASK_CHROME.get(tid);
+                    if (chrome != null) {
+                        chrome.info = latestInfo;
+                    }
+                }
+                boolean next;
+                synchronized (KEEP_AWAKE_IDS) {
+                    if (KEEP_AWAKE_IDS.contains(tid)) {
+                        KEEP_AWAKE_IDS.remove(tid);
+                        next = false;
+                    } else {
+                        KEEP_AWAKE_IDS.add(tid);
+                        next = true;
+                    }
+                }
+                syncKeepAwakeWakeLock(context);
+                keepAwakeBtn.setText(next ? "Keep Awake: ON" : "Keep Awake");
+                Toast.makeText(context,
+                        next ? "Keep Screen Awake enabled" : "Keep Screen Awake disabled",
+                        Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private static boolean isTaskInfoVisible(Object taskInfo) {
+        if (taskInfo == null) {
+            return true;
+        }
+        Object vis = field(taskInfo, "isVisible");
+        if (vis instanceof Boolean) {
+            return ((Boolean) vis).booleanValue();
+        }
+        Object visReq = field(taskInfo, "isVisibleRequested");
+        if (visReq instanceof Boolean) {
+            return ((Boolean) visReq).booleanValue();
+        }
+        return true;
+    }
+
+    /**
+     * Holds a SCREEN_BRIGHT_WAKE_LOCK in SystemUI whenever at least one visible window has
+     * Keep Awake enabled. View.setKeepScreenOn() on a SurfaceControlViewHost caption view is
+     * ignored by WindowlessWindowManager, so a real PowerManager wake lock is required.
+     */
+    @SuppressWarnings("deprecation")
+    private static void syncKeepAwakeWakeLock(Context ctx) {
+        Context src = ctx != null ? ctx : systemUiContext;
+        boolean allowed = src != null
+                && ModConfig.isModuleEnabled(src)
+                && ModConfig.getBoolean(src, ModConfig.KEY_HEADER_MENU_CUSTOM_ENABLED, true)
+                && ModConfig.getBoolean(src, ModConfig.KEY_ADD_EXTRA_WINDOW_TOOLS, true);
+        if (!allowed) {
+            KEEP_AWAKE_IDS.clear();
+        }
+        boolean shouldHold = false;
+        if (allowed && !KEEP_AWAKE_IDS.isEmpty()) {
+            ArrayList<Integer> ids = new ArrayList<Integer>();
+            synchronized (KEEP_AWAKE_IDS) {
+                ids.addAll(KEEP_AWAKE_IDS);
+            }
+            for (int i = 0; i < ids.size(); i++) {
+                Integer id = ids.get(i);
+                TaskChrome chrome = TASK_CHROME.get(id);
+                if (chrome == null) {
+                    KEEP_AWAKE_IDS.remove(id);
+                    continue;
+                }
+                if (isTaskInfoVisible(chrome.info)) {
+                    shouldHold = true;
+                    break;
+                }
+            }
+        }
+        synchronized (WAKE_LOCK_GUARD) {
+            try {
+                if (shouldHold) {
+                    if (keepAwakeWakeLock == null && src != null) {
+                        PowerManager pm = (PowerManager) src.getSystemService(Context.POWER_SERVICE);
+                        if (pm != null) {
+                            keepAwakeWakeLock = pm.newWakeLock(
+                                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ON_AFTER_RELEASE,
+                                    "dexplus:keep_awake");
+                            keepAwakeWakeLock.setReferenceCounted(false);
+                        }
+                    }
+                    if (keepAwakeWakeLock != null && !keepAwakeWakeLock.isHeld()) {
+                        keepAwakeWakeLock.acquire();
+                        XposedBridge.log(TAG + ": Keep Awake wake lock acquired");
+                    }
+                } else {
+                    if (keepAwakeWakeLock != null && keepAwakeWakeLock.isHeld()) {
+                        keepAwakeWakeLock.release();
+                        XposedBridge.log(TAG + ": Keep Awake wake lock released");
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": syncKeepAwakeWakeLock failed: " + t);
+            }
+        }
     }
 
     private static Button createPillToolButton(Context ctx, String title, int textColor, DisplayMetrics dm) {
@@ -3586,24 +3741,73 @@ public final class SystemUIWindowDecorHook {
         return Math.round(dp * density);
     }
 
+    /**
+     * BitmapDrawable that reports a fixed square intrinsic size (matching sibling menu icons)
+     * and clamps non-square draw bounds to a centered 1:1 square so the icon can never stretch
+     * vertically or horizontally while preserving native ImageView tinting and alpha.
+     */
+    private static final class SquareBitmapDrawable extends BitmapDrawable {
+        private final int intrinsicSize;
+
+        SquareBitmapDrawable(Resources res, Bitmap bitmap, int intrinsicSize) {
+            super(res, bitmap);
+            this.intrinsicSize = Math.max(1, intrinsicSize);
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return intrinsicSize;
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return intrinsicSize;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            int w = b.width();
+            int h = b.height();
+            if (w > 0 && h > 0 && w != h) {
+                int side = Math.min(w, h);
+                int left = b.left + (w - side) / 2;
+                int top = b.top + (h - side) / 2;
+                int savedL = b.left;
+                int savedT = b.top;
+                int savedR = b.right;
+                int savedB = b.bottom;
+                b.set(left, top, left + side, top + side);
+                try {
+                    super.draw(canvas);
+                } finally {
+                    b.set(savedL, savedT, savedR, savedB);
+                }
+                return;
+            }
+            super.draw(canvas);
+        }
+    }
+
     private static Bitmap infoBitmap() {
         if (infoIcon != null) {
             return infoIcon;
         }
-        int size = 64;
+        int size = 96;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint paint = new Paint();
         paint.setAntiAlias(true);
         paint.setColor(0xFFFFFFFF);
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(size * 0.08f);
-        canvas.drawCircle(size / 2f, size / 2f, size * 0.30f, paint);
+        paint.setStrokeWidth(size * 0.075f);
+        canvas.drawCircle(size / 2f, size / 2f, size * 0.38f, paint);
         paint.setStyle(Paint.Style.FILL);
-        canvas.drawCircle(size / 2f, size * 0.38f, size * 0.055f, paint);
-        paint.setStrokeWidth(size * 0.09f);
+        canvas.drawCircle(size / 2f, size * 0.33f, size * 0.052f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(size * 0.08f);
         paint.setStrokeCap(Paint.Cap.ROUND);
-        canvas.drawLine(size / 2f, size * 0.50f, size / 2f, size * 0.68f, paint);
+        canvas.drawLine(size / 2f, size * 0.47f, size / 2f, size * 0.68f, paint);
         infoIcon = bitmap;
         return bitmap;
     }

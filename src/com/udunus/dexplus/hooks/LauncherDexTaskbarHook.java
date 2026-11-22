@@ -183,7 +183,7 @@ public final class LauncherDexTaskbarHook {
     private static volatile boolean hideStatusBar = true;
     private static volatile boolean showFinderBtn = true;
     private static volatile boolean externalShowFinderBtn = true;
-    private static volatile int externalDpiOffset = 0;
+    private static volatile int externalDpiScale = ModConfig.DPI_SCALE_DEFAULT;
     private static volatile boolean externalDpiInitialized = false;
     private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static final Runnable EXTERNAL_DPI_RESTART_RUNNABLE = new Runnable() {
@@ -946,7 +946,7 @@ public final class LauncherDexTaskbarHook {
         boolean status = ModConfig.getBoolean(context, ModConfig.KEY_HIDE_STATUS_BAR, true);
         boolean finder = ModConfig.getBoolean(context, ModConfig.KEY_SHOW_DEX_FINDER_BTN, true);
         boolean extFinder = ModConfig.getBoolean(context, ModConfig.KEY_EXTERNAL_SHOW_FINDER_BTN, true);
-        int extDpi = ModConfig.getInt(context, ModConfig.KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
+        int extDpi = ModConfig.getInt(context, ModConfig.KEY_EXTERNAL_DEX_DPI_SCALE, ModConfig.DPI_SCALE_DEFAULT);
         int panelMode = ModConfig.getInt(context, ModConfig.KEY_STATUS_PANEL_MODE, 0);
 
         String signature = scale + "/" + heightScale + "/" + (enabled ? 1 : 0)
@@ -973,8 +973,8 @@ public final class LauncherDexTaskbarHook {
             settingsLoaded = true;
             changed = appliedOptions != null && !appliedOptions.equals(signature);
             appliedOptions = signature;
-            extDpiChanged = externalDpiInitialized && extDpi != externalDpiOffset;
-            externalDpiOffset = extDpi;
+            extDpiChanged = externalDpiInitialized && extDpi != externalDpiScale;
+            externalDpiScale = extDpi;
             externalDpiInitialized = true;
         }
         XposedBridge.log(TAG + ": settings " + signature);

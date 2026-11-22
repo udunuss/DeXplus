@@ -39,6 +39,7 @@ import com.udunus.dexplus.util.ModConfig;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public class SettingsActivity extends Activity {
     private static final String STATE_SELECTED_TAB = "selected_tab_index";
@@ -107,7 +108,7 @@ public class SettingsActivity extends Activity {
             new NavEntry(
                     "INTERNAL DEX",
                     "Display & DPI",
-                    "Built-in display density offset for apps, windows & UI",
+                    "Built-in display density multiplier for apps, windows & UI",
                     "BUILT-IN DISPLAY",
                     COLOR_INTERNAL,
                     ICON_INT_DPI),
@@ -128,7 +129,7 @@ public class SettingsActivity extends Activity {
             new NavEntry(
                     "EXTERNAL DEX",
                     "External Display & DPI",
-                    "Connected monitor density offset for apps, windows & UI",
+                    "Connected monitor density multiplier for apps, windows & UI",
                     "EXTERNAL DISPLAYS",
                     COLOR_EXTERNAL,
                     ICON_EXT_DPI)
@@ -1006,15 +1007,19 @@ public class SettingsActivity extends Activity {
         LinearLayout page = createPageContainer();
 
         addInfoBanner(page,
-                "Adjusts the built-in display density while Internal DeX is active. Apps, windows, and system UI scale cleanly from the display's original DPI.",
+                "Multiplies the built-in display's original system density at runtime while Internal DeX is active. Android's stored system DPI stays untouched and never compounds across reboots.",
                 COLOR_INTERNAL);
 
         addSectionLabel(page, "INTERNAL DISPLAY DPI", COLOR_INTERNAL);
         LinearLayout dpiCard = createCard();
         addSeekBarRow(dpiCard,
-                "Internal DeX DPI Offset",
-                "Adds (+) or subtracts (-) DPI from the built-in display's original density while Internal DeX is active. Affects apps, windows, and UI (0 = unchanged).",
-                ModConfig.KEY_INTERNAL_DEX_DPI_OFFSET, -120, 120, 0, " dpi", false, true, COLOR_INTERNAL);
+                "Internal DeX DPI Multiplier",
+                "Runtime multiplier applied on top of the built-in display's original system DPI while Internal DeX is active. Affects apps, windows, and UI without modifying system settings (1.00x = unchanged).",
+                ModConfig.KEY_INTERNAL_DEX_DPI_SCALE,
+                ModConfig.INTERNAL_DPI_SCALE_MIN,
+                ModConfig.INTERNAL_DPI_SCALE_MAX,
+                ModConfig.DPI_SCALE_DEFAULT,
+                "x", false, true, COLOR_INTERNAL);
         page.addView(dpiCard);
 
         return page;
@@ -1415,15 +1420,19 @@ public class SettingsActivity extends Activity {
         LinearLayout page = createPageContainer();
 
         addInfoBanner(page,
-                "Adjusts density strictly on connected external monitors and simulated secondary displays without affecting the built-in display. One UI Home automatically refreshes the external workspace after a DPI change.",
+                "Multiplies density strictly on connected external monitors and simulated secondary displays at runtime without changing Android's stored system DPI or affecting the built-in display. One UI Home automatically refreshes the external workspace after a DPI change.",
                 COLOR_EXTERNAL);
 
         addSectionLabel(page, "EXTERNAL DISPLAY DPI", COLOR_EXTERNAL);
         LinearLayout extDpiCard = createCard();
         addSeekBarRow(extDpiCard,
-                "External DeX DPI Offset",
-                "Adds (+) or subtracts (-) DPI from the external display's original density. Affects apps, windows, and taskbar independently of the built-in display (0 = unchanged).",
-                ModConfig.KEY_EXTERNAL_DEX_DPI_OFFSET, -160, 160, 0, " dpi", false, true, COLOR_EXTERNAL);
+                "External DeX DPI Multiplier",
+                "Runtime multiplier applied on top of the external display's original system DPI. Affects apps, windows, and taskbar independently of the built-in display without modifying system settings (1.00x = unchanged).",
+                ModConfig.KEY_EXTERNAL_DEX_DPI_SCALE,
+                ModConfig.EXTERNAL_DPI_SCALE_MIN,
+                ModConfig.EXTERNAL_DPI_SCALE_MAX,
+                ModConfig.DPI_SCALE_DEFAULT,
+                "x", false, true, COLOR_EXTERNAL);
         page.addView(extDpiCard);
 
         return page;
@@ -1742,6 +1751,9 @@ public class SettingsActivity extends Activity {
     }
 
     private static String formatSeekBarValue(int value, boolean signed, String unitSuffix) {
+        if ("x".equals(unitSuffix)) {
+            return String.format(Locale.US, "%.2fx", value / 100.0f);
+        }
         if (signed && value > 0) {
             return "+" + value + unitSuffix;
         }

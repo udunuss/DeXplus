@@ -27,6 +27,7 @@ import android.view.Display;
 import com.udunus.dexplus.util.InputDeviceHelper;
 import com.udunus.dexplus.util.ModConfig;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -34,7 +35,6 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -63,11 +63,26 @@ public final class FrameworkDexHook {
     private static volatile boolean loggedInside;
     private static volatile boolean loggedMouseKeyboard;
     private static volatile boolean loggedDexscIntentRewrite;
+    private static volatile boolean loggedDensityHookError;
     private static volatile boolean powerReceiverRegistered;
     private static volatile boolean displayControllerRegistered;
     private static final String EFFECTS_KEY = "externaldex_effects";
-    private static final ConcurrentHashMap<Integer, DisplayDensityBaseline> DISPLAY_BASELINES =
-            new ConcurrentHashMap<Integer, DisplayDensityBaseline>();
+    private static final int MIN_EFFECTIVE_DPI = 120;
+    private static final int MAX_EFFECTIVE_DPI = 640;
+    private static volatile int cachedInternalDpiScale = ModConfig.DPI_SCALE_DEFAULT;
+    private static volatile int cachedExternalDpiScale = ModConfig.DPI_SCALE_DEFAULT;
+    private static final ThreadLocal<IdentityHashMap<Object, ActiveDensitySwap>> ACTIVE_DENSITY_SWAPS =
+            new ThreadLocal<IdentityHashMap<Object, ActiveDensitySwap>>();
+
+    private static final class ActiveDensitySwap {
+        final Object param;
+        final int origBaseDpi;
+
+        ActiveDensitySwap(Object param, int origBaseDpi) {
+            this.param = param;
+            this.origBaseDpi = origBaseDpi;
+        }
+    }
 
     public static void init(final XC_LoadPackage.LoadPackageParam lpparam) {
         final ClassLoader cl = lpparam.classLoader;
@@ -75,6 +90,7 @@ public final class FrameworkDexHook {
         hookInputMethodMouseKeyboard(cl);
         hookDexscIntentResolution(cl);
         hookAdvancedPowerActions(cl);
+        hookDisplayDensityMultiplier(cl);
 
         try {
             final Class<?> activityRecordClass = XposedHelpers.findClassIfExists(
@@ -707,15 +723,161 @@ public final class FrameworkDexHook {
         return true;
     }
 
-    private static final class DisplayDensityBaseline {
-        final int baseDensity;
-        final boolean wasForced;
-        int lastAppliedDensity;
+    /**
+     * Hijacks DisplayContent.updateDisplayAndOrientation(Configuration) so the active display
+     * receives a runtime-multiplied logicalDensityDpi derived from the untouched system base DPI
+     * (mBaseDisplayDensity), then immediately restores mBaseDisplayDensity afterward.
+     * Because Android's persisted forced-density settings (Settings.Secure / DisplayWindowSettings)
+     * and mBaseDisplayDensity are never mutated, DPI cannot compound across reboots.
+     */
+    private static void hookDisplayDensityMultiplier(ClassLoader cl) {
+        try {
+            final Class<?> dcClass = XposedHelpers.findClassIfExists(
+                    "com.android.server.wm.DisplayContent", cl);
+            if (dcClass == null) {
+                XposedBridge.log(ModConfig.TAG + ": DisplayContent not found for DPI multiplier hook");
+                return;
+            }
+            XposedBridge.hookAllMethods(dcClass, "updateDisplayAndOrientation", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!displayControllerRegistered || param.thisObject == null) {
+                        return;
+                    }
+                    IdentityHashMap<Object, ActiveDensitySwap> active = ACTIVE_DENSITY_SWAPS.get();
+                    if (active != null && active.containsKey(param.thisObject)) {
+                        return;
+                    }
+                    try {
+                        int displayId = XposedHelpers.getIntField(param.thisObject, "mDisplayId");
+                        if (displayId < Display.DEFAULT_DISPLAY) {
+                            return;
+                        }
+                        if (displayId > Display.DEFAULT_DISPLAY
+                                && isPrivateVirtualDisplayContent(param.thisObject)) {
+                            return;
+                        }
+                        int scalePercent = (displayId == Display.DEFAULT_DISPLAY)
+                                ? cachedInternalDpiScale
+                                : cachedExternalDpiScale;
+                        if (scalePercent == ModConfig.DPI_SCALE_DEFAULT) {
+                            return;
+                        }
+                        int origBaseDpi = XposedHelpers.getIntField(param.thisObject, "mBaseDisplayDensity");
+                        if (origBaseDpi <= 0) {
+                            return;
+                        }
+                        int scaledDpi = computeScaledDpi(origBaseDpi, scalePercent);
+                        if (scaledDpi == origBaseDpi) {
+                            return;
+                        }
+                        if (active == null) {
+                            active = new IdentityHashMap<Object, ActiveDensitySwap>(2);
+                            ACTIVE_DENSITY_SWAPS.set(active);
+                        }
+                        active.put(param.thisObject, new ActiveDensitySwap(param, origBaseDpi));
+                        XposedHelpers.setIntField(param.thisObject, "mBaseDisplayDensity", scaledDpi);
+                    } catch (Throwable t) {
+                        if (!loggedDensityHookError) {
+                            loggedDensityHookError = true;
+                            XposedBridge.log(ModConfig.TAG
+                                    + ": updateDisplayAndOrientation DPI hook error: " + t);
+                        }
+                    }
+                }
 
-        DisplayDensityBaseline(int baseDensity, boolean wasForced) {
-            this.baseDensity = baseDensity;
-            this.wasForced = wasForced;
-            this.lastAppliedDensity = 0;
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject == null) {
+                        return;
+                    }
+                    IdentityHashMap<Object, ActiveDensitySwap> active = ACTIVE_DENSITY_SWAPS.get();
+                    if (active == null) {
+                        return;
+                    }
+                    ActiveDensitySwap swap = active.get(param.thisObject);
+                    if (swap == null || swap.param != param) {
+                        return;
+                    }
+                    try {
+                        XposedHelpers.setIntField(param.thisObject, "mBaseDisplayDensity", swap.origBaseDpi);
+                    } catch (Throwable ignored) {}
+                    active.remove(param.thisObject);
+                    if (active.isEmpty()) {
+                        ACTIVE_DENSITY_SWAPS.remove();
+                    }
+                }
+            });
+            XposedBridge.log(ModConfig.TAG
+                    + ": hooked DisplayContent.updateDisplayAndOrientation for runtime DPI multiplier");
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": could not hook DisplayContent DPI multiplier: " + t);
+        }
+    }
+
+    private static boolean isPrivateVirtualDisplayContent(Object dc) {
+        try {
+            Object info = XposedHelpers.getObjectField(dc, "mDisplayInfo");
+            if (info == null) {
+                return false;
+            }
+            int type = XposedHelpers.getIntField(info, "type");
+            int flags = XposedHelpers.getIntField(info, "flags");
+            // Skip private virtual displays (e.g., screen recorders / media projection)
+            // while still applying to external monitors, wireless DeX, simulated displays, and public virtual displays.
+            return type == 5 && (flags & Display.FLAG_PRIVATE) != 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static int clampDpiScale(int percent, int min, int max) {
+        if (percent < min) return min;
+        if (percent > max) return max;
+        return percent;
+    }
+
+    private static int computeScaledDpi(int baseDpi, int scalePercent) {
+        if (baseDpi <= 0) return baseDpi;
+        if (scalePercent == ModConfig.DPI_SCALE_DEFAULT) return baseDpi;
+        int scaled = Math.round(baseDpi * (scalePercent / 100.0f));
+        return Math.max(MIN_EFFECTIVE_DPI, Math.min(MAX_EFFECTIVE_DPI, scaled));
+    }
+
+    /**
+     * Reads DeX+ DPI multiplier settings and Internal DeX active state outside WMS.mGlobalLock
+     * so the updateDisplayAndOrientation hook stays lock-free and never performs Binder IPC.
+     */
+    private static void refreshCachedDpiSettings(Context ctx) {
+        if (ctx == null) return;
+        final long token = Binder.clearCallingIdentity();
+        try {
+            ModConfig.reloadIfStale(ctx, 1000L);
+            if (!ModConfig.isModuleEnabled(ctx)) {
+                cachedInternalDpiScale = ModConfig.DPI_SCALE_DEFAULT;
+                cachedExternalDpiScale = ModConfig.DPI_SCALE_DEFAULT;
+                return;
+            }
+            boolean internalDexOn = ModConfig.getBoolean(ctx, ModConfig.KEY_FORCE_INTERNAL_DEX, false);
+            if (!internalDexOn) {
+                try {
+                    internalDexOn = Settings.Global.getInt(ctx.getContentResolver(), EFFECTS_KEY, 0) == 1;
+                } catch (Throwable ignored) {}
+            }
+            int intScale = clampDpiScale(
+                    ModConfig.getInt(ctx, ModConfig.KEY_INTERNAL_DEX_DPI_SCALE, ModConfig.DPI_SCALE_DEFAULT),
+                    ModConfig.INTERNAL_DPI_SCALE_MIN,
+                    ModConfig.INTERNAL_DPI_SCALE_MAX);
+            int extScale = clampDpiScale(
+                    ModConfig.getInt(ctx, ModConfig.KEY_EXTERNAL_DEX_DPI_SCALE, ModConfig.DPI_SCALE_DEFAULT),
+                    ModConfig.EXTERNAL_DPI_SCALE_MIN,
+                    ModConfig.EXTERNAL_DPI_SCALE_MAX);
+            cachedInternalDpiScale = internalDexOn ? intScale : ModConfig.DPI_SCALE_DEFAULT;
+            cachedExternalDpiScale = extScale;
+        } catch (Throwable t) {
+            XposedBridge.log(ModConfig.TAG + ": refreshCachedDpiSettings error: " + t);
+        } finally {
+            Binder.restoreCallingIdentity(token);
         }
     }
 
@@ -726,6 +888,7 @@ public final class FrameworkDexHook {
             }
             try {
                 ModConfig.ensureInitialized(ctx);
+                refreshCachedDpiSettings(ctx);
                 final Handler mainHandler = new Handler(Looper.getMainLooper());
                 ModConfig.addChangeListener(new Runnable() {
                     @Override
@@ -760,6 +923,7 @@ public final class FrameworkDexHook {
                             mainHandler.postDelayed(new Runnable() {
                                 @Override
                                 public void run() {
+                                    refreshCachedDpiSettings(ctx);
                                     applyDisplayDpi(ctx, cl, displayId);
                                 }
                             }, 250L);
@@ -768,7 +932,6 @@ public final class FrameworkDexHook {
                         @Override
                         public void onDisplayRemoved(final int displayId) {
                             if (displayId <= Display.DEFAULT_DISPLAY) return;
-                            DISPLAY_BASELINES.remove(Integer.valueOf(displayId));
                             mainHandler.postDelayed(new Runnable() {
                                 @Override
                                 public void run() {
@@ -788,7 +951,7 @@ public final class FrameworkDexHook {
                         syncAllDisplayDpis(ctx, cl);
                     }
                 }, 1500L);
-                XposedBridge.log(ModConfig.TAG + ": registered per-display DPI & wallpaper recovery controller");
+                XposedBridge.log(ModConfig.TAG + ": registered per-display DPI multiplier & wallpaper recovery controller");
             } catch (Throwable t) {
                 XposedBridge.log(ModConfig.TAG + ": registerDisplayController error: " + t);
             }
@@ -798,6 +961,7 @@ public final class FrameworkDexHook {
     private static void syncAllDisplayDpis(Context ctx, ClassLoader cl) {
         if (ctx == null) return;
         try {
+            refreshCachedDpiSettings(ctx);
             DisplayManager dm = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
             if (dm == null) return;
             Display[] displays = dm.getDisplays();
@@ -816,71 +980,76 @@ public final class FrameworkDexHook {
         if (ctx == null || displayId < Display.DEFAULT_DISPLAY) return;
         final long token = Binder.clearCallingIdentity();
         try {
-            boolean enabled = ModConfig.isModuleEnabled(ctx);
-            int effectiveOffset;
-            if (displayId == Display.DEFAULT_DISPLAY) {
-                boolean internalDexOn = false;
-                try {
-                    internalDexOn = Settings.Global.getInt(ctx.getContentResolver(), EFFECTS_KEY, 0) == 1;
-                } catch (Throwable ignored) {}
-                int offset = ModConfig.getInt(ctx, ModConfig.KEY_INTERNAL_DEX_DPI_OFFSET, 0);
-                effectiveOffset = (enabled && internalDexOn) ? offset : 0;
-            } else {
-                int offset = ModConfig.getInt(ctx, ModConfig.KEY_EXTERNAL_DEX_DPI_OFFSET, 0);
-                effectiveOffset = enabled ? offset : 0;
-            }
-
-            DisplayDensityBaseline base = DISPLAY_BASELINES.get(Integer.valueOf(displayId));
-            if (base == null && effectiveOffset == 0) {
-                return;
-            }
-
             Class<?> wmgClass = Class.forName("android.view.WindowManagerGlobal", false, cl);
             Object wm = wmgClass.getMethod("getWindowManagerService").invoke(null);
             if (wm == null) return;
 
-            if (base == null) {
-                int initDpi = 0;
-                int curBaseDpi = 0;
-                try {
-                    Object v = wm.getClass().getMethod("getInitialDisplayDensity", int.class)
-                            .invoke(wm, Integer.valueOf(displayId));
-                    if (v instanceof Integer) initDpi = ((Integer) v).intValue();
-                } catch (Throwable ignored) {}
-                try {
-                    Object v = wm.getClass().getMethod("getBaseDisplayDensity", int.class)
-                            .invoke(wm, Integer.valueOf(displayId));
-                    if (v instanceof Integer) curBaseDpi = ((Integer) v).intValue();
-                } catch (Throwable ignored) {}
-                if (curBaseDpi <= 0) curBaseDpi = initDpi;
-                if (curBaseDpi <= 0) return;
-                base = new DisplayDensityBaseline(curBaseDpi, initDpi > 0 && curBaseDpi != initDpi);
-                DISPLAY_BASELINES.put(Integer.valueOf(displayId), base);
-            }
+            Object globalLock = XposedHelpers.getObjectField(wm, "mGlobalLock");
+            Object root = XposedHelpers.getObjectField(wm, "mRoot");
+            if (globalLock == null || root == null) return;
 
-            if (effectiveOffset == 0) {
-                if (base.lastAppliedDensity != 0) {
-                    if (base.wasForced) {
-                        wm.getClass().getMethod("setForcedDisplayDensityForUser", int.class, int.class, int.class)
-                                .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(base.baseDensity), Integer.valueOf(0));
-                    } else {
-                        wm.getClass().getMethod("clearForcedDisplayDensityForUser", int.class, int.class)
-                                .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(0));
+            int scalePercent = (displayId == Display.DEFAULT_DISPLAY)
+                    ? cachedInternalDpiScale
+                    : cachedExternalDpiScale;
+            int origBaseDpi = 0;
+            int desiredDpi = 0;
+            boolean reconfigured = false;
+
+            Method boostMethod = null;
+            Method resetMethod = null;
+            try {
+                boostMethod = wm.getClass().getMethod("boostPriorityForLockedSection");
+                resetMethod = wm.getClass().getMethod("resetPriorityAfterLockedSection");
+            } catch (Throwable ignored) {}
+
+            if (boostMethod != null) {
+                try { boostMethod.invoke(null); } catch (Throwable ignored) {}
+            }
+            try {
+                synchronized (globalLock) {
+                    Object dc = XposedHelpers.callMethod(root, "getDisplayContent", Integer.valueOf(displayId));
+                    if (dc == null) {
+                        return;
                     }
-                    XposedBridge.log(ModConfig.TAG + ": display " + displayId + " DPI restored to " + base.baseDensity);
-                    base.lastAppliedDensity = 0;
+                    if (displayId > Display.DEFAULT_DISPLAY && isPrivateVirtualDisplayContent(dc)) {
+                        return;
+                    }
+                    origBaseDpi = XposedHelpers.getIntField(dc, "mBaseDisplayDensity");
+                    if (origBaseDpi <= 0) {
+                        return;
+                    }
+                    desiredDpi = computeScaledDpi(origBaseDpi, scalePercent);
+
+                    int currentLogicalDpi = 0;
+                    Object displayInfo = XposedHelpers.getObjectField(dc, "mDisplayInfo");
+                    if (displayInfo != null) {
+                        currentLogicalDpi = XposedHelpers.getIntField(displayInfo, "logicalDensityDpi");
+                    }
+                    int currentConfigDpi = 0;
+                    try {
+                        Object cfg = XposedHelpers.callMethod(dc, "getConfiguration");
+                        if (cfg != null) {
+                            currentConfigDpi = XposedHelpers.getIntField(cfg, "densityDpi");
+                        }
+                    } catch (Throwable ignored) {}
+
+                    if (currentLogicalDpi == desiredDpi
+                            && (currentConfigDpi <= 0 || currentConfigDpi == desiredDpi)) {
+                        return;
+                    }
+
+                    XposedHelpers.callMethod(dc, "reconfigureDisplayLocked");
+                    reconfigured = true;
                 }
-                DISPLAY_BASELINES.remove(Integer.valueOf(displayId));
-                return;
+            } finally {
+                if (resetMethod != null) {
+                    try { resetMethod.invoke(null); } catch (Throwable ignored) {}
+                }
             }
 
-            int target = Math.max(120, Math.min(640, base.baseDensity + effectiveOffset));
-            if (target != base.lastAppliedDensity) {
-                wm.getClass().getMethod("setForcedDisplayDensityForUser", int.class, int.class, int.class)
-                        .invoke(wm, Integer.valueOf(displayId), Integer.valueOf(target), Integer.valueOf(0));
-                base.lastAppliedDensity = target;
-                XposedBridge.log(ModConfig.TAG + ": display " + displayId + " DPI set to "
-                        + target + " (base=" + base.baseDensity + ", offset=" + effectiveOffset + ")");
+            if (reconfigured) {
+                XposedBridge.log(ModConfig.TAG + ": display " + displayId + " runtime DPI -> "
+                        + desiredDpi + " (systemBase=" + origBaseDpi + ", multiplier=" + scalePercent + "%)");
             }
         } catch (Throwable t) {
             XposedBridge.log(ModConfig.TAG + ": applyDisplayDpi(" + displayId + ") error: " + t);
